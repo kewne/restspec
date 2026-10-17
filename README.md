@@ -68,3 +68,62 @@ objects and arrays, nullable values, and alternative payload shapes.
 Schemas describe payload structure, while profiles describe entity relationships
 and discoverable interactions. Keeping these concerns separate allows each
 component to focus on a different part of the API contract.
+
+## TypeScript Type Generation
+
+Requires Node.js 22 or newer and npm. From this repository:
+
+```sh
+npm install
+npm run build
+node dist/cli.js generate-types examples/checklist-api/restspec.yml --out generated/types.ts
+```
+
+The npm package exposes the `restspec` command. To install this local package
+globally after building it:
+
+```sh
+npm install --global .
+restspec generate-types examples/checklist-api/restspec.yml --out generated/types.ts
+```
+
+Use `restspec --help` for usage or `restspec --version` for the package version.
+The `--out` option (also `-o`) is required and must name a `.ts` file. Paths on
+the command line are relative to the current working directory. Missing output
+directories are created; existing output is replaced only after successful
+generation. Input files cannot also be used as output.
+
+### Generated Types
+
+[Quicktype](https://github.com/glideapps/quicktype) generates one combined module
+of exported TypeScript interfaces and type aliases, without runtime converters
+or validators. Date and date-time fields remain strings, and string enums use
+union types. Empty-object, array, and primitive payloads also have named exports.
+
+Top-level names come from the schema's nonempty `title`, or its filename without
+`.json` when no title is present. Quicktype converts these into TypeScript
+identifiers: `Checklist instance` becomes `ChecklistInstance`, for example.
+Duplicate titles or fallback names are rejected rather than silently dropping
+a schema.
+
+```ts
+import type { Checklist, ChecklistInstance, Root, Subscription } from "./generated/types.js";
+```
+
+Generated types are not a substitute for JSON Schema validation. Quicktype may
+approximate constraints, including exclusive `oneOf`, `not`, and some JSON Schema
+2020-12 keywords. In the checklist example, `Subscription` has a status union
+and an optional `endDate`; its generated type does not enforce that `ACTIVE`
+requires an end date and `INACTIVE` forbids one. The source schemas are not
+modified during generation.
+
+### Development
+
+```sh
+npm test
+npm pack
+```
+
+Tests exercise the CLI and compile generated types with strict TypeScript
+checks. Packing builds the CLI and includes its compiled files and this README;
+it does not publish the package.

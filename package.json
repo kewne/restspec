@@ -1,0 +1,31 @@
+{
+  "name": "restspec",
+  "version": "0.1.0",
+  "description": "Generate TypeScript types from restspec JSON schemas.",
+  "type": "module",
+  "bin": {
+    "restspec": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck:test": "tsc -p tsconfig.test.json",
+    "test": "npm run build && npm run typecheck:test && vitest run",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "quicktype-core": "^26.0.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}
