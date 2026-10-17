@@ -48,6 +48,7 @@ async function profileFiles(directory: string): Promise<string[]> {
 
 class LocalSchemaStore extends JSONSchemaStore {
   readonly inputs = new Set<string>();
+  readonly resourceSchemas = new Map<string, Schema>();
 
   override async get(address: string, debugPrint: boolean): Promise<Schema | undefined> {
     if (!URL.canParse(address)) {
@@ -60,6 +61,13 @@ class LocalSchemaStore extends JSONSchemaStore {
   }
 
   async fetch(address: string): Promise<Schema> {
+    if (!address.startsWith("file:")) {
+      throw new Error(`Only local schema references are supported: ${address}`);
+    }
+    const resource = this.resourceSchemas.get(fileURLToPath(address));
+    if (resource !== undefined) {
+      return resource;
+    }
     const path = await realpath(fileURLToPath(address));
     this.inputs.add(path);
     const content = await readFile(path, "utf8");
@@ -79,12 +87,13 @@ class LocalSchemaStore extends JSONSchemaStore {
 export async function generateTypes(specPath: string, outputPath: string): Promise<void> {
   const specFile = await realpath(resolve(specPath));
   const spec = await readMapping(specFile);
-  requiredString(spec.url, "url", specFile);
+  const url = requiredString(spec.url, "url", specFile);
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", specFile);
   const files = await profileFiles(join(dirname(specFile), "profiles"));
   const profiles = new Map<string, string>();
   const schemaFiles = new Set<string>();
   const inputs = new Set([specFile]);
+  let rootSchema: string | undefined;
 
   for (const file of files) {
     inputs.add(await realpath(file));
@@ -94,13 +103,33 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
       throw new Error(`${file}: duplicate profile URI ${uri} (also in ${profiles.get(uri)})`);
     }
     profiles.set(uri, file);
+    if (profile.rels !== undefined) {
+      if (!isMapping(profile.rels)) {
+        throw new Error(`${file}: rels must be a relation-type mapping`);
+      }
+      for (const [relation, descriptions] of Object.entries(profile.rels)) {
+        if (!Array.isArray(descriptions)) {
+          throw new Error(`${file}: rels.${relation} must be an array`);
+        }
+        for (const description of descriptions) {
+          if (!isMapping(description)) {
+            throw new Error(`${file}: rels.${relation} entries must be mappings`);
+          }
+          requiredString(description.profile, `rels.${relation}.profile`, file);
+        }
+      }
+    }
     if (!isMapping(profile.schema)) {
       throw new Error(`${file}: schema must be a media-type mapping`);
     }
     const schema = profile.schema["application/json"];
     if (schema !== undefined) {
       const relativePath = requiredString(schema, "schema.application/json", file);
-      schemaFiles.add(await realpath(resolve(dirname(file), relativePath)));
+      const schemaFile = await realpath(resolve(dirname(file), relativePath));
+      schemaFiles.add(schemaFile);
+      if (uri === rootProfile) {
+        rootSchema = schemaFile;
+      }
     }
   }
 
@@ -114,6 +143,7 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
   const store = new LocalSchemaStore();
   const schemaInput = new JSONSchemaInput(store);
   const names = new Map<string, string>();
+  let rootSourceName: string | undefined;
   for (const file of schemaFiles) {
     const uri = pathToFileURL(file).href;
     const schema = await store.fetch(uri);
@@ -125,14 +155,25 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
       throw new Error(`${file}: duplicate schema type name ${name} (also in ${names.get(name)})`);
     }
     names.set(name, file);
-    await schemaInput.addSource({ name, uris: [uri] });
+    if (file === rootSchema) {
+      rootSourceName = name;
+    }
+    const resourcePath = `${file}.restspec-resource`;
+    store.resourceSchemas.set(resourcePath, {
+      title: name,
+      type: "object",
+      properties: { properties: { $ref: uri } },
+      required: ["properties"],
+      additionalProperties: false,
+    });
+    await schemaInput.addSource({ name, uris: [pathToFileURL(resourcePath).href] });
   }
 
   const inputData = new InputData();
   inputData.addInput(schemaInput);
   const { lines } = await quicktype({
     inputData,
-    lang: new TypeScriptTypesLanguage(),
+    lang: new TypeScriptTypesLanguage({ url, profile: rootProfile, sourceName: rootSourceName }),
     inferDateTimes: false,
   });
 

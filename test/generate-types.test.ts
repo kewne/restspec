@@ -37,6 +37,8 @@ function success(result: SpawnSyncReturns<string>): void {
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "restspec-"));
   onTestFinished(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, "node_modules"));
+  await symlink(root, join(directory, "node_modules/restspec"), "dir");
   return directory;
 }
 
@@ -67,6 +69,287 @@ async function fixture(schema: Schema = basicSchema) {
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 
+test("resource wrapper nests payload properties without wrapping nested objects", async () => {
+  const project = await fixture({
+    ...basicSchema,
+    properties: {
+      id: { type: "string" },
+      nested: {
+        type: "object", properties: { count: { type: "integer" } },
+        required: ["count"], additionalProperties: false,
+      },
+    },
+    required: ["id", "nested"],
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toMatch(/export interface Payload \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
+  expect(types.match(/export interface /g)).toHaveLength(1);
+  expect(types).toContain("getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];");
+  expect(types).not.toContain("rels:");
+});
+
+test.each([false, true])("inlines schema properties while retaining recursive references (nullable: %s)", async (nullable) => {
+  const node = {
+    type: "object",
+    properties: {
+      value: { type: "string" },
+      children: { type: "array", items: { $ref: "#" } },
+    },
+    required: ["value", "children"],
+    additionalProperties: false,
+  };
+  const project = await fixture(nullable
+    ? { title: "Node", anyOf: [{ type: "null" }, node] }
+    : { title: "Node", ...node });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toMatch(/properties:\s*(?:null \| )?\{/);
+  const consumer = await project.put("consumer.ts", `import type { Node } from "./generated/types.js";
+export const tree: Node["properties"] = { value: "root", children: [{ value: "leaf", children: [] }] };
+`);
+  const compiled = spawnSync(process.execPath, [
+    join(root, "node_modules/typescript/bin/tsc"),
+    "--strict", "--noEmit", "--skipLibCheck", consumer,
+  ], { encoding: "utf8" });
+  expect(compiled.error).toBeUndefined();
+  expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+});
+
+test("getRel uses caller-supplied Methods and returns typed Link arrays", async () => {
+  const project = await fixture();
+  const childProfile = "https://example.test/profiles/child";
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": "../schemas/payload.json" },
+    rels: {
+      related: [{ name: "child", profile: childProfile }, { name: "external", profile: "urn:external" }],
+      create: [{ name: "child", profile: childProfile }],
+      "create-from": [{ name: "child", profile: childProfile }],
+      "urn:custom": [{ name: "self", profile: rootProfile }],
+      empty: [],
+    },
+  });
+  await project.put("profiles/child.yml", {
+    profile: childProfile,
+    schema: { "application/json": "../schemas/child.json" },
+    rels: { related: [{ name: "parent", profile: rootProfile }] },
+  });
+  await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types.match(/getRel<METHODS extends Methods>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
+  expect(types).not.toContain("rels:");
+  const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "restspec";
+import type { Payload, Child } from "./generated/types.js";
+declare const resource: Payload;
+export const properties: string = resource.properties.id;
+type CreateMethods = { post: [{ label: string }, Child] };
+export const links: Link<CreateMethods>[] = resource.getRel<CreateMethods>("create-from");
+export const name: string = links[0].name;
+export const title: string = links[0].title;
+export const created: Promise<Child> = links[0].request.post({ label: "child" });
+export const parent: Promise<Payload> = ({} as Child).getRel<{ get: [void, Payload] }>("related")[0].request.get();
+export const custom: Link<Methods>[] = resource.getRel<Methods>("urn:custom");
+export const unspecified: Link<Methods>[] = resource.getRel("not-in-the-spec");
+declare const defaults: Link;
+export const defaultGet: Promise<unknown> = defaults.request.get({});
+export const defaultPost: Promise<unknown> = defaults.request.post("body");
+export const defaultPut: Promise<unknown> = links[0].request.put({});
+export const defaultPatch: Promise<unknown> = defaults.request.patch(null);
+export const defaultDelete: Promise<unknown> = defaults.request.delete(undefined);
+export const defaultHead: Promise<unknown> = unspecified[0].request.head(undefined);
+export const defaultOptions: Promise<unknown> = defaults.request.options({});
+declare const customMethod: Link<{ search: [{ query: string }, Child] }>;
+export const searched: Promise<Child> = customMethod.request.search({ query: "child" });
+`);
+  const compiled = spawnSync(process.execPath, [
+    join(root, "node_modules/typescript/bin/tsc"),
+    "--strict", "--noEmit", "--skipLibCheck", consumer,
+  ], { encoding: "utf8" });
+  expect(compiled.error).toBeUndefined();
+  expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+  await project.put("consumer.ts", `import type { Link } from "restspec";
+import type { Payload } from "./generated/types.js";
+declare const resource: Payload;
+resource.getRel<{ get: string }>("related");
+declare const request: Link<{ get: [void, string] }>["request"];
+const missingMetadata: Link<{ get: [void, string] }> = { request };
+declare const link: Link<{ get: [void, string] }>;
+link.get();
+link.request.get("invalid body");
+declare const defaults: Link;
+const wrongDefault: Promise<string> = defaults.request.get({});
+const wrongInferredDefault: Promise<string> = resource.getRel("related")[0].request.post({});
+const wrongBody: string = {} as Parameters<typeof defaults.request.post>[0];
+resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.post({ label: 123 });
+`);
+  const invalid = spawnSync(process.execPath, [
+    join(root, "node_modules/typescript/bin/tsc"),
+    "--strict", "--noEmit", "--skipLibCheck", consumer,
+  ], { encoding: "utf8" });
+  expect(invalid.error).toBeUndefined();
+  expect(invalid.status).not.toBe(0);
+  expect(invalid.stdout).toContain("does not satisfy the constraint 'Methods'");
+  expect(invalid.stdout).toContain("name, title");
+  expect(invalid.stdout).toContain("Property 'get' does not exist");
+  expect(invalid.stdout).toContain("Argument of type 'string' is not assignable to parameter of type 'void'");
+  expect(invalid.stdout).toContain("Type 'Promise<unknown>' is not assignable to type 'Promise<string>'");
+  expect(invalid.stdout).toContain("Type 'unknown' is not assignable to type 'string'");
+  expect(invalid.stdout).toContain("Type 'number' is not assignable to type 'string'");
+});
+
+test("root export uses the generated root schema type name", async () => {
+  const project = await fixture({ ...basicSchema, title: "Root payload" });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain('import type { ApiRoot, Link, Methods } from "restspec";');
+  expect(types).toContain("export interface RootPayload");
+  expect(types).toContain("export const root: ApiRoot<RootPayload> = {");
+  expect(types).toContain('url: "https://example.test/",');
+  expect(types).toContain(`profile: ${JSON.stringify(rootProfile)},`);
+});
+
+test.each([
+  { title: "Scalar payload", type: "string", name: "ScalarPayload" },
+  { title: "Array payload", type: "array", items: { type: "string" }, name: "ArrayPayload" },
+])("root export references a wrapped $type payload", async ({ name, ...schema }) => {
+  const project = await fixture(schema);
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain(`export interface ${name} {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+});
+
+test("root export follows its profile rather than discovery order and shares schema types", async () => {
+  const project = await fixture();
+  await project.put("profiles/aaa.yml", {
+    profile: "https://example.test/profiles/first",
+    schema: { "application/json": "../schemas/first.json" },
+  });
+  await project.put("schemas/first.json", JSON.stringify({ title: "First", type: "boolean" }));
+  await project.put("profiles/alias.yml", {
+    profile: "https://example.test/profiles/alias",
+    schema: { "application/json": "../schemas/payload.json" },
+    rels: { related: [{ name: "root", profile: rootProfile }] },
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toMatch(/export interface First \{\s+properties:\s*boolean;/);
+  expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
+  expect(types).toContain("export const root: ApiRoot<Payload> = {");
+  expect(types.match(/getRel<METHODS extends Methods>/g)).toHaveLength(2);
+});
+
+test("root export falls back to unknown without a root JSON schema", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", { profile: rootProfile, schema: {} });
+  await project.put("profiles/other.yml", {
+    profile: "https://example.test/profiles/other",
+    schema: { "application/json": "../schemas/payload.json" },
+  });
+  success(project.generate());
+  expect(await readFile(project.output, "utf8")).toContain("export const root: ApiRoot<unknown> = {");
+});
+
+test("root export uses deconflicted schema identifiers", async () => {
+  const project = await fixture({ ...basicSchema, title: "Root payload" });
+  await project.put("profiles/other.yml", {
+    profile: "https://example.test/profiles/other",
+    schema: { "application/json": "../schemas/other.json" },
+  });
+  await project.put("schemas/other.json", JSON.stringify({
+    title: "root-payload", type: "object", properties: { count: { type: "number" } }, required: ["count"],
+  }));
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  const name = types.match(/export interface (\w+) \{\s+properties: \{\s+id:/)?.[1];
+  expect(name).toBeDefined();
+  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+});
+
+test.each(["ApiRoot", "Link", "Methods"])("root export handles the %s type name and preserves escaped values", async (title) => {
+  const project = await fixture({ ...basicSchema, title });
+  const url = 'https://example.test/"\\\n';
+  const profile = 'https://example.test/profiles/"\\\n';
+  await project.put("restspec.yml", { url, rootProfile: profile });
+  await project.put("profiles/root.yml", {
+    profile, schema: { "application/json": "../schemas/payload.json" },
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  const name = types.match(/export interface (\w+)/)?.[1];
+  expect(name).toBeDefined();
+  expect(name).not.toBe("ApiRoot");
+  expect(name).not.toBe("Link");
+  expect(name).not.toBe("Methods");
+  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+  const compiled = spawnSync(process.execPath, [
+    join(root, "node_modules/typescript/bin/tsc"),
+    "--strict", "--skipLibCheck", "--module", "ES2022", "--moduleResolution", "node",
+    "--outDir", join(project.directory, "compiled"), project.output,
+  ], { encoding: "utf8" });
+  expect(compiled.error).toBeUndefined();
+  expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+  const javascript = await readFile(join(project.directory, "compiled/types.js"), "utf8");
+  expect(javascript).not.toContain("restspec");
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`;
+  const loaded = spawnSync(process.execPath, [
+    "--input-type=module", "--eval",
+    `import { root } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(root));`,
+  ], { encoding: "utf8" });
+  success(loaded);
+  expect(JSON.parse(loaded.stdout)).toEqual({ url, profile });
+});
+
+test("root export resolves ApiRoot from the packed package", async () => {
+  const project = await fixture();
+  success(project.generate());
+  const packed = spawnSync("npm", ["pack", "--json", "--pack-destination", project.directory], {
+    cwd: root, encoding: "utf8", timeout: 20_000,
+  });
+  expect(packed.error).toBeUndefined();
+  expect(packed.status, packed.stdout + packed.stderr).toBe(0);
+  const packages: { filename: string }[] = JSON.parse(packed.stdout);
+  expect(packages).toHaveLength(1);
+  const packageDirectory = join(project.directory, "node_modules/restspec");
+  await rm(packageDirectory);
+  await mkdir(packageDirectory);
+  const extracted = spawnSync("tar", [
+    "-xzf", join(project.directory, packages[0]!.filename),
+    "--strip-components=1", "-C", packageDirectory,
+  ], { encoding: "utf8" });
+  success(extracted);
+  await project.put("package.json", { type: "module" });
+  const consumer = await project.put("consumer.ts", `import { fromRoot } from "restspec";
+import type { ApiRoot, Link } from "restspec";
+import { root } from "./generated/types.js";
+import type { Payload } from "./generated/types.js";
+export const entry: ApiRoot<Payload> = root;
+const inferred = fromRoot(root);
+export const entryLink: Link<{ get: [void, Payload] }> = inferred;
+export const name: string = inferred.name;
+export const title: string = inferred.title;
+export const result: Promise<Payload> = inferred.request.get();
+export async function readRoot(): Promise<Payload> {
+  const resource = await inferred.request.get();
+  const id: string = resource.properties.id;
+  return resource;
+}
+declare const resource: Payload;
+export const links: Link<{ get: [void, Payload] }>[] = resource.getRel<{ get: [void, Payload] }>("related");
+`);
+  for (const [module, resolution] of [["NodeNext", "NodeNext"], ["ES2022", "node"]]) {
+    const compiled = spawnSync(process.execPath, [
+      join(root, "node_modules/typescript/bin/tsc"),
+      "--strict", "--noEmit", "--skipLibCheck", "--module", module!,
+      "--moduleResolution", resolution!, consumer,
+    ], { encoding: "utf8" });
+    expect(compiled.error).toBeUndefined();
+    expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+  }
+}, 20_000);
+
 test("generates all example types as deterministic, strict-compilable exports", async () => {
   const directory = await temporaryDirectory();
   const output = join(directory, "types.ts");
@@ -82,11 +365,13 @@ test("generates all example types as deterministic, strict-compilable exports", 
     expect(types).toMatch(new RegExp(`export (?:interface|type) ${name}\\b`));
   }
   expect(types).toMatch(/checklistId:\s*(?:null \| string|string \| null);/);
-  expect(types).toMatch(/completed:\s*(?:null \| Completed|Completed \| null);/);
+  expect(types).toMatch(/completed:\s*(?:null \| )?\{/);
   expect(types).toMatch(/note\?:\s*(?:null \| string|string \| null);/);
   expect(types).toMatch(/description\?:\s*string;/);
   expect(types).toMatch(/createdAt:\s*string;/);
   expect(types).toMatch(/"ACTIVE" \| "INACTIVE"/);
+  expect(types.match(/export interface /g)).toHaveLength(4);
+  expect(types).not.toMatch(/\b(?:FluffyItem|PurpleItem|Completed|Status)\b/);
   expect(types).not.toMatch(/\b(?:Convert|Date|enum|function)\b/);
   expect(types.endsWith("\n")).toBe(true);
   expect(types).not.toContain("\r");
@@ -94,10 +379,18 @@ test("generates all example types as deterministic, strict-compilable exports", 
   expect(await readFile(output, "utf8")).toBe(types);
 
   const consumer = join(directory, "consumer.ts");
-  await writeFile(consumer, `import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
+  await writeFile(consumer, `import type { ApiRoot } from "restspec";
+import { root } from "./types.js";
+import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
+export const entry: ApiRoot<Root> = root;
+export const url: string = root.url;
+export const profile: string = root.profile;
 export type Payloads = Root | Checklist | ChecklistInstance | Subscription;
-export const nullableId: ChecklistInstance["checklistId"] = null;
-export const timestamp: ChecklistInstance["createdAt"] = "2026-10-17T00:00:00Z";
+export const nullableId: ChecklistInstance["properties"]["checklistId"] = null;
+export const timestamp: ChecklistInstance["properties"]["createdAt"] = "2026-10-17T00:00:00Z";
+declare const resource: Root;
+export const related = resource.getRel<{ get: [void, Subscription] }>("related");
+export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
 `);
   const compiled = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
@@ -124,7 +417,7 @@ test("discovers nested YAML profiles, includes unreachable profiles and deduplic
   await project.put("schemas/other.json", JSON.stringify({ title: "Other", type: "boolean" }));
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toMatch(/export type Other = boolean;/);
+  expect(types).toMatch(/export interface Other \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
 });
 
@@ -149,12 +442,12 @@ test("resolves local cross-file and internal refs with spaces in paths", async (
 });
 
 test.each<[label: string, schema: Schema, expected: RegExp]>([
-  ["primitive", { title: "Value", type: "string" }, /export type Value = string;/],
-  ["array", { title: "Value", type: "array", items: { type: "number" } }, /export type Value = number\[\];/],
-  ["map", { title: "Value", type: "object", additionalProperties: { type: "boolean" } }, /export type Value = \{ \[key: string\]: boolean \};/],
-  ["union", { title: "Value", oneOf: [{ type: "string" }, { type: "null" }] }, /export type Value = (?:null \| string|string \| null);/],
+  ["primitive", { title: "Value", type: "string" }, /properties:\s*string;/],
+  ["array", { title: "Value", type: "array", items: { type: "number" } }, /properties:\s*number\[\];/],
+  ["map", { title: "Value", type: "object", additionalProperties: { type: "boolean" } }, /properties:\s*\{ \[key: string\]: boolean \};/],
+  ["union", { title: "Value", oneOf: [{ type: "string" }, { type: "null" }] }, /properties:\s*(?:null \| string|string \| null);/],
   ["unnamed", { type: "object", properties: { id: { type: "string" } } }, /export interface Payload\b/],
-  ["boolean schema", true, /export type Payload = unknown;/],
+  ["boolean schema", true, /properties:\s*unknown;/],
 ])("exports a top-level %s schema", async (_label, schema, expected) => {
   const project = await fixture(schema);
   success(project.generate());
@@ -176,6 +469,10 @@ test.each<[label: string, change: (project: Fixture) => Promise<unknown>, expect
   ["duplicate profile URI", (project) => project.put("profiles/duplicate.yml", { profile: rootProfile, schema: {} }), /duplicate profile URI/],
   ["invalid schema mapping", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: [] }), /schema must be a media-type mapping/],
   ["invalid schema path", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": 3 } }), /schema.application\/json must be a nonempty string/],
+  ["invalid relations", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: [] }), /rels must be a relation-type mapping/],
+  ["invalid relation array", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: {} } }), /rels.related must be an array/],
+  ["invalid relation entry", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: ["invalid"] } }), /rels.related entries must be mappings/],
+  ["missing relation target", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{}] } }), /rels.related.profile must be a nonempty string/],
   ["no JSON schemas", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: {} }), /no application\/json schemas found/],
   ["remote reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "https://example.invalid/schema.json" })), /Only local schema references are supported/],
 ])("reports %s without replacing existing output", async (_label, change, expected) => {
@@ -230,7 +527,7 @@ test("retains distinct top-level names and filename fallbacks across schemas", a
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface Payload\b/);
   expect(types).toMatch(/export interface Other\b/);
-  expect(types).toMatch(/export type FallbackSchema = string;/);
+  expect(types).toMatch(/export interface FallbackSchema \{\s+properties:\s*string;/);
 });
 
 test("protects schemas consumed only through a reference", async () => {

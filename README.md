@@ -100,6 +100,10 @@ of exported TypeScript interfaces and type aliases, without runtime converters
 or validators. Date and date-time fields remain strings, and string enums use
 union types. Empty-object, array, and primitive payloads also have named exports.
 
+Schema payloads are inlined in each resource's `properties`, including nested
+objects and array items. Named payload types are retained only where recursive
+references require them.
+
 Top-level names come from the schema's nonempty `title`, or its filename without
 `.json` when no title is present. Quicktype converts these into TypeScript
 identifiers: `Checklist instance` becomes `ChecklistInstance`, for example.
@@ -107,12 +111,13 @@ Duplicate titles or fallback names are rejected rather than silently dropping
 a schema.
 
 ```ts
+import { root } from "./generated/types.js";
 import type { Checklist, ChecklistInstance, Root, Subscription } from "./generated/types.js";
 ```
 
 Generated types are not a substitute for JSON Schema validation. Quicktype may
 approximate constraints, including exclusive `oneOf`, `not`, and some JSON Schema
-2020-12 keywords. In the checklist example, `Subscription` has a status union
+2020-12 keywords. In the checklist example, `Subscription.properties` has a status union
 and an optional `endDate`; its generated type does not enforce that `ACTIVE`
 requires an end date and `INACTIVE` forbids one. The source schemas are not
 modified during generation.
@@ -127,3 +132,48 @@ npm pack
 Tests exercise the CLI and compile generated types with strict TypeScript
 checks. Packing builds the CLI and includes its compiled files and this README;
 it does not publish the package.
+
+## Generated Client
+
+The checklist example's generated module includes:
+
+```ts
+import type { ApiRoot, Link, Methods } from "restspec";
+
+export interface Root {
+   properties: { [key: string]: unknown };
+   getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];
+}
+
+export const root: ApiRoot<Root> = {
+   url: "http://localhost:3000/",
+   profile: "https://checklists.keeoon.dev/profiles/root",
+};
+```
+
+Client usage with an explicitly typed relation:
+
+```ts
+import { fromRoot } from "restspec";
+import { root as apiRoot } from "./generated/types.js";
+import type { Checklist } from "./generated/types.js";
+
+const rootLink = fromRoot(apiRoot);
+const root = await rootLink.request.get();
+
+const createLink = root
+   .getRel<{ post: [{ title: string }, Checklist] }>("create")
+   .find((link) => link.name === "checklists");
+
+if (createLink) {
+   const checklist = await createLink.request.post({ title: "My new checklist" });
+   console.log(checklist.properties.title);
+}
+```
+
+`getRel` returns an array of links with `name`, `title`, and `request` properties.
+Concrete method tuples specify request bodies and response resources; other
+common HTTP methods accept `unknown` and return `Promise<unknown>`.
+
+This illustrates the client types only. `fromRoot` is currently a stub and does
+not yet implement HTTP requests or resource navigation.
