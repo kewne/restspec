@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Checklist instance",
+  "type": "object",
+  "required": ["id", "checklistId", "createdBy", "createdAt", "title", "items"],
+  "properties": {
+    "id": { "type": "string" },
+    "checklistId": { "type": ["string", "null"] },
+    "createdBy": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "title": { "type": "string" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "completed", "title"],
+        "properties": {
+          "name": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "completed": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["completed_at"],
+                "properties": {
+                  "completed_at": { "type": "string", "format": "date-time" },
+                  "note": { "type": ["string", "null"] }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+profile: https://checklists.keeoon.dev/profiles/subscription
+schema:
+  application/json: ../schemas/json/subscription.json
+rels: {}

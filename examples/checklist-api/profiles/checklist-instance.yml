@@ -1,0 +1,27 @@
+profile: https://checklists.keeoon.dev/profiles/checklist-instance
+schema:
+  application/json: ../schemas/json/checklist-instance.json
+rels:
+  related:
+    - name: checklist
+      description: The source checklist.
+      profile: https://checklists.keeoon.dev/profiles/checklist
+  update:
+    - name: add-item
+      description: Adds an item to this instance.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance
+    - name: clear-completed-items
+      description: Removes all completed items from this instance.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance
+  create-from:
+    - name: checklist
+      description: Creates a checklist from this instance.
+      profile: https://checklists.keeoon.dev/profiles/checklist
+  complete-item:
+    - name: Item name
+      description: Completes the corresponding item. One link per incomplete item, named using the item's `name`.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance
+  mark-incomplete-item:
+    - name: Item name
+      description: Marks the corresponding item incomplete. One link per completed item, named using the item's `name`.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance

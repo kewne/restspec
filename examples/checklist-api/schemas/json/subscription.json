@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Subscription",
+  "type": "object",
+  "required": ["status"],
+  "oneOf": [
+    {
+      "required": ["endDate"],
+      "properties": {
+        "status": { "const": "ACTIVE" },
+        "endDate": { "type": "string", "format": "date-time" }
+      }
+    },
+    {
+      "properties": {
+        "status": { "const": "INACTIVE" }
+      },
+      "not": { "required": ["endDate"] }
+    }
+  ]
+}

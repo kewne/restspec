@@ -1,0 +1,12 @@
+profile: https://checklists.keeoon.dev/profiles/checklist
+schema:
+  application/json: ../schemas/json/checklist.json
+rels:
+  create-from:
+    - name: instance
+      description: Creates an instance from this checklist.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance
+  related:
+    - name: shares
+      description: Lists the shares for this checklist.
+      profile: https://checklists.keeoon.dev/profiles/checklist-shares

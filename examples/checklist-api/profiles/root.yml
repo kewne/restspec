@@ -1,0 +1,21 @@
+profile: https://checklists.keeoon.dev/profiles/root
+schema:
+  application/json: ../schemas/json/root.json
+rels:
+  related:
+    - name: checklists
+      description: The current user's checklists.
+      profile: https://checklists.keeoon.dev/profiles/user-checklists
+    - name: checklist-instances
+      description: The current user's checklist instances.
+      profile: https://checklists.keeoon.dev/profiles/user-checklist-instances
+    - name: subscription
+      description: The current user's subscription.
+      profile: https://checklists.keeoon.dev/profiles/subscription
+  create:
+    - name: checklists
+      description: Creates a checklist for the current user.
+      profile: https://checklists.keeoon.dev/profiles/checklist
+    - name: checklist-instances
+      description: Creates a checklist instance for the current user.
+      profile: https://checklists.keeoon.dev/profiles/checklist-instance
