@@ -91,6 +91,8 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", specFile);
   const files = await profileFiles(join(dirname(specFile), "profiles"));
   const profiles = new Map<string, string>();
+  const profileSchemas = new Map<string, string>();
+  const profileRelations = new Map<string, { relation: string; name: string; profile: string }[]>();
   const schemaFiles = new Set<string>();
   const inputs = new Set([specFile]);
   let rootSchema: string | undefined;
@@ -103,6 +105,8 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
       throw new Error(`${file}: duplicate profile URI ${uri} (also in ${profiles.get(uri)})`);
     }
     profiles.set(uri, file);
+    const relations: { relation: string; name: string; profile: string }[] = [];
+    profileRelations.set(uri, relations);
     if (profile.rels !== undefined) {
       if (!isMapping(profile.rels)) {
         throw new Error(`${file}: rels must be a relation-type mapping`);
@@ -115,7 +119,11 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
           if (!isMapping(description)) {
             throw new Error(`${file}: rels.${relation} entries must be mappings`);
           }
-          requiredString(description.profile, `rels.${relation}.profile`, file);
+          const target = requiredString(description.profile, `rels.${relation}.profile`, file);
+          if (description.name !== undefined) {
+            const name = requiredString(description.name, `rels.${relation}.name`, file);
+            relations.push({ relation, name, profile: target });
+          }
         }
       }
     }
@@ -127,6 +135,7 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
       const relativePath = requiredString(schema, "schema.application/json", file);
       const schemaFile = await realpath(resolve(dirname(file), relativePath));
       schemaFiles.add(schemaFile);
+      profileSchemas.set(uri, schemaFile);
       if (uri === rootProfile) {
         rootSchema = schemaFile;
       }
@@ -171,9 +180,28 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
 
   const inputData = new InputData();
   inputData.addInput(schemaInput);
+  const sourceNames = new Map([...names].map(([name, file]) => [file, name]));
+  const relations = new Map<string, { relation: string; name: string; sourceName: string | undefined }[]>();
+  for (const [profile, descriptions] of profileRelations) {
+    const schema = profileSchemas.get(profile);
+    const sourceName = schema === undefined ? undefined : sourceNames.get(schema);
+    if (sourceName === undefined) {
+      continue;
+    }
+    const entries = relations.get(sourceName) ?? [];
+    relations.set(sourceName, entries);
+    for (const description of descriptions) {
+      const target = profileSchemas.get(description.profile);
+      entries.push({
+        relation: description.relation,
+        name: description.name,
+        sourceName: target === undefined ? undefined : sourceNames.get(target),
+      });
+    }
+  }
   const { lines } = await quicktype({
     inputData,
-    lang: new TypeScriptTypesLanguage({ url, profile: rootProfile, sourceName: rootSourceName }),
+    lang: new TypeScriptTypesLanguage({ url, profile: rootProfile, sourceName: rootSourceName }, relations),
     inferDateTimes: false,
   });
 

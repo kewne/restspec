@@ -19,6 +19,12 @@ type RootMetadata = {
   sourceName: string | undefined;
 };
 
+type Relations = ReadonlyMap<string, readonly {
+  relation: string;
+  name: string;
+  sourceName: string | undefined;
+}[]>;
+
 class ExportedTypesRenderer extends TypeScriptRenderer {
   private rootName: Name | undefined;
   private readonly inlineTypes = new Set<Type>();
@@ -29,6 +35,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
     renderContext: RenderContext,
     options: ConstructorParameters<typeof TypeScriptRenderer>[2],
     private readonly root: RootMetadata,
+    private readonly relations: Relations,
   ) {
     super(language, renderContext, options);
   }
@@ -103,6 +110,31 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       const properties = type.getProperties().get("properties")!;
       this.emitLine("properties: ", this.sourceFor(properties.type).source, ";");
       this.emitLine("getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];");
+      this.emitLine("get rels(): {");
+      this.indent(() => {
+        const groups = new Map<string, Map<string, Set<string | undefined>>>();
+        for (const entry of this.relations.get(source) ?? []) {
+          const names = groups.get(entry.relation) ?? new Map<string, Set<string | undefined>>();
+          groups.set(entry.relation, names);
+          const targets = names.get(entry.name) ?? new Set<string | undefined>();
+          names.set(entry.name, targets);
+          targets.add(entry.sourceName);
+        }
+        for (const [relation, names] of groups) {
+          this.emitLine("get ", JSON.stringify(relation), "(): {");
+          this.indent(() => {
+            for (const [linkName, targets] of names) {
+              const responses: Sourcelike[] = [...targets].map((target, index) => {
+                const type = target === undefined ? undefined : this.topLevels.get(target);
+                return [index > 0 ? " | " : "", type === undefined ? "unknown" : this.nameForNamedType(type)];
+              });
+              this.emitLine("get ", JSON.stringify(linkName), "(): Link<{ get: [void, ", responses, "] }>;");
+            }
+          });
+          this.emitLine("};");
+        }
+      });
+      this.emitLine("};");
     });
     this.emitLine("}");
   }
@@ -146,7 +178,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
 }
 
 export class TypeScriptTypesLanguage extends TypeScriptTargetLanguage {
-  constructor(private readonly root: RootMetadata) {
+  constructor(private readonly root: RootMetadata, private readonly relations: Relations = new Map()) {
     super();
   }
 
@@ -160,6 +192,7 @@ export class TypeScriptTypesLanguage extends TypeScriptTargetLanguage {
         "explicit-unions": "true",
       }),
       this.root,
+      this.relations,
     );
   }
 }

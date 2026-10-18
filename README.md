@@ -176,6 +176,23 @@ and `request` properties.
 Concrete method tuples specify request bodies and response resources; other
 common HTTP methods accept `unknown` and return `Promise<unknown>`.
 
+Resources also expose a read-only `rels` getter, grouped by relation type and
+known link name:
+
+```ts
+const root = await fromRoot(apiRoot).request.get();
+const subscription = await root.rels.related.subscription.request.get();
+await root.rels.related.checklists.request.post({ title: "My new checklist" });
+```
+
+Named links infer their GET response resource from the target profile's local
+JSON schema. External targets and targets without a JSON schema return `unknown`.
+Other HTTP methods retain the default `unknown` bodies and responses; use
+`getRel` with explicit method tuples when those types are needed. Relation types
+and names containing punctuation use bracket access, such as
+`checklist.rels["create-from"].instance`. Descriptions without a name are available
+only through `getRel`.
+
 To enter the API through an existing resource URL instead of its root, use
 `fromHref` with the expected resource type:
 

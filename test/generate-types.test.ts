@@ -86,7 +86,7 @@ test("resource wrapper nests payload properties without wrapping nested objects"
   expect(types).toMatch(/export interface Payload \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
   expect(types.match(/export interface /g)).toHaveLength(1);
   expect(types).toContain("getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];");
-  expect(types).not.toContain("rels:");
+  expect(types).toContain("get rels(): {");
 });
 
 test.each([false, true])("inlines schema properties while retaining recursive references (nullable: %s)", async (nullable) => {
@@ -139,11 +139,26 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types.match(/getRel<METHODS extends Methods>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
-  expect(types).not.toContain("rels:");
+  expect(types).toContain("get rels(): {");
   const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "restspec";
 import type { Payload, Child } from "./generated/types.js";
 declare const resource: Payload;
 export const properties: string = resource.properties.id;
+export const namedChild: Promise<Child> = resource.rels.related.child.request.get();
+export const namedParent: Promise<Payload> = ({} as Child).rels.related.parent.request.get();
+export const namedExternal: Promise<unknown> = resource.rels.related.external.request.get();
+export const namedCustom: Promise<Payload> = resource.rels["urn:custom"].self.request.get();
+export const namedCreate = resource.rels["create-from"].child.request.post({ label: "child" });
+// @ts-expect-error Unknown link names are not exposed.
+resource.rels.related.missing;
+// @ts-expect-error Unknown relations are not exposed.
+resource.rels.missing;
+// @ts-expect-error Named links are getters.
+resource.rels.related.child = resource.rels.related.child;
+// @ts-expect-error The relationship index is a getter.
+resource.rels = resource.rels;
+// @ts-expect-error Local target response types are preserved.
+const incorrectTarget: Promise<Payload> = resource.rels.related.child.request.get();
 type CreateMethods = { post: [{ label: string }, Child] };
 export const links: Link<CreateMethods>[] = resource.getRel<CreateMethods>("create-from");
 export const name: string = links[0].name;
@@ -239,6 +254,7 @@ test("root export follows its profile rather than discovery order and shares sch
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
   expect(types).toContain("export const root: ApiRoot<Payload> = {");
   expect(types.match(/getRel<METHODS extends Methods>/g)).toHaveLength(2);
+  expect(types).toContain('get "root"(): Link<{ get: [void, Payload] }>;');
 });
 
 test("root export falls back to unknown without a root JSON schema", async () => {
@@ -401,7 +417,8 @@ test("generates all example types as deterministic, strict-compilable exports", 
   expect(await readFile(output, "utf8")).toBe(types);
 
   const consumer = join(directory, "consumer.ts");
-  await writeFile(consumer, `import type { ApiRoot } from "restspec";
+  await writeFile(consumer, `import { fromRoot } from "restspec";
+import type { ApiRoot } from "restspec";
 import { root } from "./types.js";
 import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
 export const entry: ApiRoot<Root> = root;
@@ -413,6 +430,14 @@ export const timestamp: ChecklistInstance["properties"]["createdAt"] = "2026-10-
 declare const resource: Root;
 export const related = resource.getRel<{ get: [void, Subscription] }>("related");
 export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
+export async function typeSafeAccess() {
+  const resource = await fromRoot(root).request.get();
+  await resource.rels.related.checklists.request.post({ title: "My New Checklist" });
+  const subscription: Subscription = await resource.rels.related.subscription.request.get();
+  const checklist: Checklist = await resource.rels.create.checklists.request.get();
+  const instance: ChecklistInstance = await checklist.rels["create-from"].instance.request.get();
+  return { subscription, instance };
+}
 `);
   const compiled = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
@@ -495,6 +520,7 @@ test.each<[label: string, change: (project: Fixture) => Promise<unknown>, expect
   ["invalid relation array", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: {} } }), /rels.related must be an array/],
   ["invalid relation entry", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: ["invalid"] } }), /rels.related entries must be mappings/],
   ["missing relation target", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{}] } }), /rels.related.profile must be a nonempty string/],
+  ["invalid relation name", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{ name: 123, profile: rootProfile }] } }), /rels.related.name must be a nonempty string/],
   ["no JSON schemas", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: {} }), /no application\/json schemas found/],
   ["remote reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "https://example.invalid/schema.json" })), /Only local schema references are supported/],
 ])("reports %s without replacing existing output", async (_label, change, expected) => {
