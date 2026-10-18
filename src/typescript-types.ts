@@ -14,7 +14,7 @@ import {
 } from "quicktype-core";
 
 type RootMetadata = {
-  url: string;
+  env: Readonly<Record<string, { readonly url: string; readonly description?: string }>>;
   profile: string;
   sourceName: string | undefined;
 };
@@ -41,7 +41,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
   }
 
   protected override forbiddenNamesForGlobalNamespace(): string[] {
-    return [...super.forbiddenNamesForGlobalNamespace(), "ApiRoot", "Link", "Methods", "METHODS", "root"];
+    return [...super.forbiddenNamesForGlobalNamespace(), "ApiRoot", "ENV", "Link", "Methods", "METHODS", "root"];
   }
 
   protected override makeNameForTopLevel(type: Type, givenName: string, namedType: Type | undefined): Name {
@@ -168,9 +168,37 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       },
     );
     this.ensureBlankLine();
-    this.emitLine("export const root: ApiRoot<", this.rootName ?? "unknown", "> = {");
+    const envEntries = Object.entries(this.root.env);
+    const envType: Sourcelike[] = envEntries.map(([name], index) => [
+      index > 0 ? " " : "",
+      /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name),
+      ": string;",
+    ]);
+    this.emitLine(
+      "export const root: ApiRoot<",
+      this.rootName ?? "unknown",
+      ", { ",
+      envType,
+      " }> = {",
+    );
     this.indent(() => {
-      this.emitLine("url: ", JSON.stringify(this.root.url), ",");
+      this.emitLine("env: {");
+      this.indent(() => {
+        for (const [name, entry] of envEntries) {
+          if (entry.description !== undefined) {
+            this.emitDescription(
+              entry.description.replace(/\r\n?|[\u0085\u2028\u2029]/g, "\n").split("\n"),
+            );
+          }
+          this.emitLine(
+            /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : JSON.stringify(name),
+            ": ",
+            JSON.stringify(entry.url),
+            ",",
+          );
+        }
+      });
+      this.emitLine("},");
       this.emitLine("profile: ", JSON.stringify(this.root.profile), ",");
     });
     this.emitLine("};");

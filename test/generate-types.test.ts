@@ -50,7 +50,18 @@ async function fixture(schema: Schema = basicSchema) {
     await writeFile(path, typeof value === "string" ? value : stringify(value));
     return path;
   };
-  const spec = await put("restspec.yml", { url: "https://example.test/", rootProfile });
+  const spec = await put("restspec.yml", {
+    env: {
+      staging: {
+        url: "https://staging.example.test/",
+        description: "Staging environment.",
+      },
+      production: {
+        url: "https://example.test/",
+      },
+    },
+    rootProfile,
+  });
   await put("profiles/root.yml", {
     profile: rootProfile,
     schema: { "application/json": "../schemas/payload.json" },
@@ -220,8 +231,14 @@ test("root export uses the generated root schema type name", async () => {
   const types = await readFile(project.output, "utf8");
   expect(types).toContain('import type { ApiRoot, Link, Methods } from "restspec";');
   expect(types).toContain("export interface RootPayload");
-  expect(types).toContain("export const root: ApiRoot<RootPayload> = {");
-  expect(types).toContain('url: "https://example.test/",');
+  expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; }> = {");
+  expect(types).toContain(`    env: {
+        /**
+         * Staging environment.
+         */
+        staging: "https://staging.example.test/",
+        production: "https://example.test/",
+    },`);
   expect(types).toContain(`profile: ${JSON.stringify(rootProfile)},`);
 });
 
@@ -233,7 +250,7 @@ test.each([
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types).toContain(`export interface ${name} {`);
-  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; }> = {`);
 });
 
 test("root export follows its profile rather than discovery order and shares schema types", async () => {
@@ -252,7 +269,7 @@ test("root export follows its profile rather than discovery order and shares sch
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface First \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
-  expect(types).toContain("export const root: ApiRoot<Payload> = {");
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
   expect(types.match(/getRel<METHODS extends Methods>/g)).toHaveLength(2);
   expect(types).toContain('get "root"(): Link<{ get: [void, Payload] }>;');
 });
@@ -265,7 +282,7 @@ test("root export falls back to unknown without a root JSON schema", async () =>
     schema: { "application/json": "../schemas/payload.json" },
   });
   success(project.generate());
-  expect(await readFile(project.output, "utf8")).toContain("export const root: ApiRoot<unknown> = {");
+  expect(await readFile(project.output, "utf8")).toContain("export const root: ApiRoot<unknown, { staging: string; production: string; }> = {");
 });
 
 test("root export uses deconflicted schema identifiers", async () => {
@@ -281,14 +298,23 @@ test("root export uses deconflicted schema identifiers", async () => {
   const types = await readFile(project.output, "utf8");
   const name = types.match(/export interface (\w+) \{\s+properties: \{\s+id:/)?.[1];
   expect(name).toBeDefined();
-  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; }> = {`);
 });
 
-test.each(["ApiRoot", "Link", "Methods"])("root export handles the %s type name and preserves escaped values", async (title) => {
+test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s type name and preserves escaped values", async (title) => {
   const project = await fixture({ ...basicSchema, title });
-  const url = 'https://example.test/"\\\n';
+  const env = {
+    staging: 'https://staging.example.test/"\\\n',
+    "prod-env\"\\\n": 'https://example.test/"\\\n',
+  };
   const profile = 'https://example.test/profiles/"\\\n';
-  await project.put("restspec.yml", { url, rootProfile: profile });
+  await project.put("restspec.yml", {
+    env: {
+      staging: { url: env.staging, description: 'Staging */ "\\\nSecond line' },
+      "prod-env\"\\\n": { url: env["prod-env\"\\\n"] },
+    },
+    rootProfile: profile,
+  });
   await project.put("profiles/root.yml", {
     profile, schema: { "application/json": "../schemas/payload.json" },
   });
@@ -297,9 +323,15 @@ test.each(["ApiRoot", "Link", "Methods"])("root export handles the %s type name 
   const name = types.match(/export interface (\w+)/)?.[1];
   expect(name).toBeDefined();
   expect(name).not.toBe("ApiRoot");
+  expect(name).not.toBe("ENV");
   expect(name).not.toBe("Link");
   expect(name).not.toBe("Methods");
-  expect(types).toContain(`export const root: ApiRoot<${name}> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; ${JSON.stringify("prod-env\"\\\n")}: string; }> = {`);
+  expect(types).toContain(`        /**
+         * Staging * / "\\
+         * Second line
+         */
+        staging:`);
   const compiled = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
     "--strict", "--skipLibCheck", "--module", "ES2022", "--moduleResolution", "node",
@@ -315,7 +347,7 @@ test.each(["ApiRoot", "Link", "Methods"])("root export handles the %s type name 
     `import { root } from ${JSON.stringify(moduleUrl)}; console.log(JSON.stringify(root));`,
   ], { encoding: "utf8" });
   success(loaded);
-  expect(JSON.parse(loaded.stdout)).toEqual({ url, profile });
+  expect(JSON.parse(loaded.stdout)).toEqual({ env, profile });
 });
 
 test("root export resolves ApiRoot from the packed package", async () => {
@@ -341,8 +373,18 @@ test("root export resolves ApiRoot from the packed package", async () => {
 import type { ApiRoot, Link } from "restspec";
 import { root } from "./generated/types.js";
 import type { Payload } from "./generated/types.js";
-export const entry: ApiRoot<Payload> = root;
-const inferred = fromRoot(root);
+export const entry: ApiRoot<Payload, { staging: string; production: string }> = root;
+export const genericEntry: ApiRoot<Payload> = root;
+const inferred = fromRoot(root, "staging");
+export const productionLink: Link<{ get: [void, Payload] }> = fromRoot(root, "production");
+// @ts-expect-error Environment argument is required.
+fromRoot(root);
+// @ts-expect-error Only defined environment keys are accepted.
+fromRoot(root, "unknown");
+// @ts-expect-error ApiRoot requires an env record.
+const missingEnv: ApiRoot<Payload> = { profile: root.profile };
+// @ts-expect-error ApiRoot env values must be strings.
+const nonStringEnv: ApiRoot<Payload, { staging: number }> = { env: { staging: 123 }, profile: root.profile };
 export const entryLink: Link<{ get: [void, Payload] }> = inferred;
 export const name: string = inferred.name;
 export const title: string = inferred.title;
@@ -421,8 +463,10 @@ test("generates all example types as deterministic, strict-compilable exports", 
 import type { ApiRoot } from "restspec";
 import { root } from "./types.js";
 import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
-export const entry: ApiRoot<Root> = root;
-export const url: string = root.url;
+export const entry: ApiRoot<Root, { local: string; staging: string; production: string }> = root;
+export const localUrl: string = root.env.local;
+export const stagingUrl: string = root.env.staging;
+export const productionUrl: string = root.env.production;
 export const profile: string = root.profile;
 export type Payloads = Root | Checklist | ChecklistInstance | Subscription;
 export const nullableId: ChecklistInstance["properties"]["checklistId"] = null;
@@ -431,7 +475,7 @@ declare const resource: Root;
 export const related = resource.getRel<{ get: [void, Subscription] }>("related");
 export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
 export async function typeSafeAccess() {
-  const resource = await fromRoot(root).request.get();
+  const resource = await fromRoot(root, "local").request.get();
   await resource.rels.related.checklists.request.post({ title: "My New Checklist" });
   const subscription: Subscription = await resource.rels.related.subscription.request.get();
   const checklist: Checklist = await resource.rels.create.checklists.request.get();
@@ -502,11 +546,21 @@ test.each<[label: string, schema: Schema, expected: RegExp]>([
 });
 
 test.each<[label: string, change: (project: Fixture) => Promise<unknown>, expected: RegExp]>([
-  ["missing root profile", (project) => project.put("restspec.yml", { url: "https://example.test/", rootProfile: "missing" }), /rootProfile missing has no local profile/],
-  ["invalid main spec", (project) => project.put("restspec.yml", { rootProfile }), /url must be a nonempty string/],
+  ["missing root profile", (project) => project.put("restspec.yml", { env: { production: { url: "https://example.test/" } }, rootProfile: "missing" }), /rootProfile missing has no local profile/],
+  ["invalid main spec", (project) => project.put("restspec.yml", { rootProfile }), /env must be a nonempty environment mapping/],
+  ["legacy single url spec", (project) => project.put("restspec.yml", { url: "https://example.test/", rootProfile }), /env must be a nonempty environment mapping/],
+  ["non-mapping env", (project) => project.put("restspec.yml", { env: ["https://example.test/"], rootProfile }), /env must be a nonempty environment mapping/],
+  ["empty env mapping", (project) => project.put("restspec.yml", { env: {}, rootProfile }), /env must be a nonempty environment mapping/],
+  ["blank env key", (project) => project.put("restspec.yml", { env: { "   ": { url: "https://example.test/" } }, rootProfile }), /env key must be a nonempty string/],
+  ["non-mapping env entry", (project) => project.put("restspec.yml", { env: { staging: "https://example.test/" }, rootProfile }), /env\.staging must be a mapping/],
+  ["missing env url", (project) => project.put("restspec.yml", { env: { staging: { description: "Staging" } }, rootProfile }), /env\.staging\.url must be a nonempty string/],
+  ["invalid env url", (project) => project.put("restspec.yml", { env: { staging: { url: "" } }, rootProfile }), /env\.staging\.url must be a nonempty string/],
+  ["non-string env url", (project) => project.put("restspec.yml", { env: { staging: { url: 123 } }, rootProfile }), /env\.staging\.url must be a nonempty string/],
+  ["empty env description", (project) => project.put("restspec.yml", { env: { staging: { url: "https://example.test/", description: "   " } }, rootProfile }), /env\.staging\.description must be a nonempty string/],
+  ["non-string env description", (project) => project.put("restspec.yml", { env: { staging: { url: "https://example.test/", description: 123 } }, rootProfile }), /env\.staging\.description must be a nonempty string/],
   ["non-mapping spec", (project) => project.put("restspec.yml", "- invalid\n"), /expected a YAML mapping/],
   ["malformed YAML", (project) => project.put("profiles/root.yml", "profile: [\n"), /root\.yml:/],
-  ["duplicate YAML keys", (project) => project.put("restspec.yml", "url: first\nurl: second\n"), /Map keys must be unique/],
+  ["duplicate YAML keys", (project) => project.put("restspec.yml", "env:\n  staging:\n    url: first\n  staging:\n    url: second\n"), /Map keys must be unique/],
   ["malformed JSON", (project) => project.put("schemas/payload.json", "{ invalid"), /payload\.json: invalid JSON/],
   ["invalid schema", (project) => project.put("schemas/payload.json", "[]"), /expected a JSON Schema object or boolean/],
   ["empty schema title", (project) => project.put("schemas/payload.json", JSON.stringify({ ...basicSchema, title: "" })), /schema title must be a nonempty string/],
@@ -612,7 +666,7 @@ test.each(["--profiles", "-p"])("reads profiles from a custom directory with %s"
   success(relativeResult);
   const types = await readFile(project.output, "utf8");
   expect(types).toContain("export interface Payload");
-  expect(types).toContain("export const root: ApiRoot<Payload> = {");
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
 
   const absoluteOutput = join(project.directory, "generated/absolute-types.ts");
   const absoluteResult = invoke([

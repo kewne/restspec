@@ -1,2 +1,11 @@
-url: http://localhost:3000/
+env:
+  local:
+    url: http://localhost:3000/
+    description: Local development environment.
+  staging:
+    url: https://staging.example.com/
+    description: Staging environment.
+  production:
+    url: https://example.com/
+    description: Production environment.
 rootProfile: https://checklists.keeoon.dev/profiles/root

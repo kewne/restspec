@@ -91,7 +91,23 @@ export async function generateTypes(
 ): Promise<void> {
   const entrypointFile = await realpath(resolve(entrypointPath));
   const spec = await readMapping(entrypointFile);
-  const url = requiredString(spec.url, "url", entrypointFile);
+  if (!isMapping(spec.env) || Object.keys(spec.env).length === 0) {
+    throw new Error(`${entrypointFile}: env must be a nonempty environment mapping`);
+  }
+  const env: Record<string, { url: string; description?: string }> = {};
+  for (const [name, value] of Object.entries(spec.env)) {
+    const key = requiredString(name, "env key", entrypointFile);
+    if (!isMapping(value)) {
+      throw new Error(`${entrypointFile}: env.${key} must be a mapping`);
+    }
+    const description = value.description === undefined
+      ? undefined
+      : requiredString(value.description, `env.${key}.description`, entrypointFile);
+    env[key] = {
+      url: requiredString(value.url, `env.${key}.url`, entrypointFile),
+      ...(description === undefined ? {} : { description }),
+    };
+  }
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointFile);
   const profilesDir = profilesPath !== undefined
     ? resolve(profilesPath)
@@ -208,7 +224,7 @@ export async function generateTypes(
   }
   const { lines } = await quicktype({
     inputData,
-    lang: new TypeScriptTypesLanguage({ url, profile: rootProfile, sourceName: rootSourceName }, relations),
+    lang: new TypeScriptTypesLanguage({ env, profile: rootProfile, sourceName: rootSourceName }, relations),
     inferDateTimes: false,
   });
 

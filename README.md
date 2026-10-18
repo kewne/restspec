@@ -28,12 +28,29 @@ the API exposes, and the structure of their payloads.
 
 The main file defines where clients begin interacting with the API:
 
-- `url`: the API's entrypoint URL.
+- `env`: a mapping of environment names (such as `local`, `staging`, or
+   `production`) to environment definitions. Each environment includes a
+   required `url` for that environment's entrypoint and an optional
+   human-readable `description`.
 - `rootProfile`: the canonical URL identifying the profile describing the
    entrypoint's entity. It matches that profile's `profile` value, not a local
    file path.
 
-Only the entrypoint URL needs to be known in advance. Clients discover further
+```yaml
+env:
+  local:
+    url: http://localhost:3000/
+    description: Local development environment.
+  staging:
+    url: https://staging.example.com/
+    description: Staging environment.
+  production:
+    url: https://example.com/
+    description: Production environment.
+rootProfile: https://checklists.keeoon.dev/profiles/root
+```
+
+Only the entrypoint URLs need to be known in advance. Clients discover further
 URLs through links returned by the API.
 
 ### Profile Files
@@ -148,11 +165,27 @@ export interface Root {
    getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];
 }
 
-export const root: ApiRoot<Root> = {
-   url: "http://localhost:3000/",
+export const root: ApiRoot<Root, { local: string; staging: string; production: string; }> = {
+   env: {
+      /**
+       * Local development environment.
+       */
+      local: "http://localhost:3000/",
+      /**
+       * Staging environment.
+       */
+      staging: "https://staging.example.com/",
+      /**
+       * Production environment.
+       */
+      production: "https://example.com/",
+   },
    profile: "https://checklists.keeoon.dev/profiles/root",
 };
 ```
+
+`root.env` maps each environment name from `restspec.yml` to its entrypoint URL,
+and `fromRoot` accepts `root` along with one of its defined environment keys.
 
 Client usage with an explicitly typed relation:
 
@@ -161,7 +194,7 @@ import { fromRoot } from "restspec";
 import { root as apiRoot } from "./generated/types.js";
 import type { Checklist } from "./generated/types.js";
 
-const rootLink = fromRoot(apiRoot);
+const rootLink = fromRoot(apiRoot, "local");
 const root = await rootLink.request.get();
 
 const createLink = root
@@ -183,7 +216,7 @@ Resources also expose a read-only `rels` getter, grouped by relation type and
 known link name:
 
 ```ts
-const root = await fromRoot(apiRoot).request.get();
+const root = await fromRoot(apiRoot, "local").request.get();
 const subscription = await root.rels.related.subscription.request.get();
 await root.rels.related.checklists.request.post({ title: "My new checklist" });
 ```

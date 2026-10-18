@@ -1,6 +1,6 @@
 
-export type ApiRoot<RootResource> = {
-    url: string
+export type ApiRoot<RootResource, ENV extends Record<string, string> = Record<string, string>> = {
+    env: ENV
     profile: string
     readonly __resourceType?: RootResource
 }
@@ -21,7 +21,7 @@ export type Link<TYPES extends Methods = {}> = {
     }
 }
 
-export function fromRoot<RESOURCE>(root: ApiRoot<RESOURCE>): Link<{ get: [void, RESOURCE] }> {
+export function fromRoot<RESOURCE, ENV extends Record<string, string>>(root: ApiRoot<RESOURCE, ENV>, env: keyof ENV & string): Link<{ get: [void, RESOURCE] }> {
     return {} as unknown as Link<{ get: [void, RESOURCE] }>
 }
 

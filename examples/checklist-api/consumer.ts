@@ -3,7 +3,7 @@ import * as types from '../../generated/types.js'
 
 async function accessFromRoot() {
     
-    const rootLink = fromRoot(types.root)
+    const rootLink = fromRoot(types.root, 'local')
     
     const root = await rootLink.request.get()
     
@@ -23,7 +23,7 @@ async function accessFromBookmark() {
 }
 
 async function typeSafeAccess() {
-    const root = await fromRoot(types.root).request.get();
+    const root = await fromRoot(types.root, 'local').request.get();
     const list = await root.rels.related.checklists.request.get();
     await root.rels.related.checklists.request.post({
         'title': 'My New Checklist'
