@@ -84,17 +84,24 @@ class LocalSchemaStore extends JSONSchemaStore {
   }
 }
 
-export async function generateTypes(specPath: string, outputPath: string): Promise<void> {
-  const specFile = await realpath(resolve(specPath));
-  const spec = await readMapping(specFile);
-  const url = requiredString(spec.url, "url", specFile);
-  const rootProfile = requiredString(spec.rootProfile, "rootProfile", specFile);
-  const files = await profileFiles(join(dirname(specFile), "profiles"));
+export async function generateTypes(
+  entrypointPath: string,
+  outputPath: string,
+  profilesPath?: string,
+): Promise<void> {
+  const entrypointFile = await realpath(resolve(entrypointPath));
+  const spec = await readMapping(entrypointFile);
+  const url = requiredString(spec.url, "url", entrypointFile);
+  const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointFile);
+  const profilesDir = profilesPath !== undefined
+    ? resolve(profilesPath)
+    : join(dirname(entrypointFile), "profiles");
+  const files = await profileFiles(profilesDir);
   const profiles = new Map<string, string>();
   const profileSchemas = new Map<string, string>();
   const profileRelations = new Map<string, { relation: string; name: string; profile: string }[]>();
   const schemaFiles = new Set<string>();
-  const inputs = new Set([specFile]);
+  const inputs = new Set([entrypointFile]);
   let rootSchema: string | undefined;
 
   for (const file of files) {
@@ -143,10 +150,10 @@ export async function generateTypes(specPath: string, outputPath: string): Promi
   }
 
   if (!profiles.has(rootProfile)) {
-    throw new Error(`${specFile}: rootProfile ${rootProfile} has no local profile`);
+    throw new Error(`${entrypointFile}: rootProfile ${rootProfile} has no local profile`);
   }
   if (schemaFiles.size === 0) {
-    throw new Error(`${specFile}: no application/json schemas found`);
+    throw new Error(`${entrypointFile}: no application/json schemas found`);
   }
 
   const store = new LocalSchemaStore();

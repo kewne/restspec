@@ -597,10 +597,41 @@ test("requires a .ts output file", async () => {
   expect(result.stderr).toMatch(/output must have a .ts extension/);
 });
 
+test.each(["--profiles", "-p"])("reads profiles from a custom directory with %s", async (flag) => {
+  const project = await fixture();
+  await rm(join(project.directory, "profiles"), { recursive: true });
+  await project.put("custom-profiles/nested/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": "../../schemas/payload.json" },
+    rels: {},
+  });
+  const relativeResult = invoke(
+    ["generate-types", "restspec.yml", flag, "custom-profiles", "--out", "generated/types.ts"],
+    project.directory,
+  );
+  success(relativeResult);
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain("export interface Payload");
+  expect(types).toContain("export const root: ApiRoot<Payload> = {");
+
+  const absoluteOutput = join(project.directory, "generated/absolute-types.ts");
+  const absoluteResult = invoke([
+    "generate-types",
+    project.spec,
+    flag,
+    join(project.directory, "custom-profiles"),
+    "--out",
+    absoluteOutput,
+  ]);
+  success(absoluteResult);
+  expect(await readFile(absoluteOutput, "utf8")).toBe(types);
+});
+
 test("shows help and package version", async () => {
   const help = invoke(["--help"]);
   success(help);
-  expect(help.stdout).toMatch(/Usage: restspec generate-types/);
+  expect(help.stdout).toMatch(/Usage: restspec generate-types <entrypoint> \[--profiles <dir>\] --out <types\.ts>/);
+  expect(help.stdout).toContain("-p, --profiles <dir>");
   const version = invoke(["--version"]);
   success(version);
   const metadata: { version: string } = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
@@ -615,6 +646,9 @@ test.each([
   { args: ["generate-types", "spec.yml", "extra", "--out", "types.ts"] },
   { args: ["--unknown"] },
   { args: ["generate-types", "spec.yml", "--out", ""] },
+  { args: ["generate-types", "spec.yml", "--profiles", "", "--out", "types.ts"] },
+  { args: ["generate-types", "spec.yml", "-p", "   ", "--out", "types.ts"] },
+  { args: ["generate-types", "spec.yml", "--profiles"] },
 ])("rejects invalid invocation $args", ({ args }) => {
   const result = invoke(args);
   expect(result.status).toBe(1);

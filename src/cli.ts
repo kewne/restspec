@@ -4,20 +4,22 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { generateTypes } from "./generate-types.js";
 
-const usage = `Usage: restspec generate-types <restspec.yml> --out <types.ts>
+const usage = `Usage: restspec generate-types <entrypoint> [--profiles <dir>] --out <types.ts>
 
 Generate TypeScript types from all application/json schemas in profiles/.
 
 Options:
-  -o, --out <file>  Required output TypeScript file
-  -h, --help        Show help
-  -v, --version     Show version
+  -p, --profiles <dir>  Profiles directory (default: profiles/ next to entrypoint)
+  -o, --out <file>      Required output TypeScript file
+  -h, --help            Show help
+  -v, --version         Show version
 `;
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
+      profiles: { type: "string", short: "p" },
       out: { type: "string", short: "o" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },
@@ -37,17 +39,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  const [command, specPath] = positionals;
+  const [command, entrypointPath] = positionals;
   if (
     command !== "generate-types" ||
-    !specPath ||
+    !entrypointPath ||
     positionals.length !== 2 ||
-    !values.out?.trim()
+    !values.out?.trim() ||
+    (values.profiles !== undefined && !values.profiles.trim())
   ) {
     throw new Error(usage.trimEnd());
   }
 
-  await generateTypes(specPath, values.out);
+  await generateTypes(entrypointPath, values.out, values.profiles);
 }
 
 main().catch((error: unknown) => {

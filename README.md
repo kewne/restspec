@@ -76,7 +76,7 @@ Requires Node.js 22 or newer and npm. From this repository:
 ```sh
 npm install
 npm run build
-node dist/cli.js generate-types examples/checklist-api/restspec.yml --out generated/types.ts
+node dist/cli.js generate-types examples/checklist-api/restspec.yml --profiles examples/checklist-api/profiles --out generated/types.ts
 ```
 
 The npm package exposes the `restspec` command. To install this local package
@@ -84,14 +84,17 @@ globally after building it:
 
 ```sh
 npm install --global .
-restspec generate-types examples/checklist-api/restspec.yml --out generated/types.ts
+restspec generate-types examples/checklist-api/restspec.yml --profiles examples/checklist-api/profiles --out generated/types.ts
 ```
 
 Use `restspec --help` for usage or `restspec --version` for the package version.
-The `--out` option (also `-o`) is required and must name a `.ts` file. Paths on
-the command line are relative to the current working directory. Missing output
-directories are created; existing output is replaced only after successful
-generation. Input files cannot also be used as output.
+`generate-types` accepts the entrypoint specification file as its positional
+argument, an optional `--profiles` (also `-p`) directory containing profile
+YAML files (defaulting to `profiles/` next to the entrypoint file), and a
+required `--out` (also `-o`) option naming a `.ts` file. Paths on the command
+line are relative to the current working directory. Missing output directories
+are created; existing output is replaced only after successful generation. Input
+files cannot also be used as output.
 
 ### Generated Types
 
