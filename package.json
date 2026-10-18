@@ -1,24 +1,35 @@
 {
-  "name": "restspec",
+  "name": "@kewne/restspec",
   "version": "0.1.0",
   "description": "Generate TypeScript types from restspec JSON schemas.",
+  "homepage": "https://github.com/kewne/restspec#readme",
+  "bugs": {
+    "url": "https://github.com/kewne/restspec/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kewne/restspec.git"
+  },
+  "license": "ISC",
+  "author": "kewne@protonmail.com",
   "type": "module",
-  "main": "dist/base-types.js",
-  "types": "dist/base-types.d.ts",
   "exports": {
     "types": "./dist/base-types.d.ts",
     "default": "./dist/base-types.js"
   },
+  "main": "dist/base-types.js",
+  "types": "dist/base-types.d.ts",
   "bin": {
     "restspec": "dist/cli.js"
+  },
+  "directories": {
+    "example": "examples",
+    "test": "test"
   },
   "files": [
     "dist",
     "README.md"
   ],
-  "engines": {
-    "node": ">=22"
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck:test": "tsc -p tsconfig.test.json",
@@ -33,5 +44,8 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3",
     "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
