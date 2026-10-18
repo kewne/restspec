@@ -321,7 +321,7 @@ test("root export resolves ApiRoot from the packed package", async () => {
   ], { encoding: "utf8" });
   success(extracted);
   await project.put("package.json", { type: "module" });
-  const consumer = await project.put("consumer.ts", `import { fromBookmark, fromRoot } from "restspec";
+  const consumer = await project.put("consumer.ts", `import { fromHref, fromRoot } from "restspec";
 import type { ApiRoot, Link } from "restspec";
 import { root } from "./generated/types.js";
 import type { Payload } from "./generated/types.js";
@@ -330,6 +330,9 @@ const inferred = fromRoot(root);
 export const entryLink: Link<{ get: [void, Payload] }> = inferred;
 export const name: string = inferred.name;
 export const title: string = inferred.title;
+export const href: string = inferred.href;
+// @ts-expect-error Link href is read-only.
+inferred.href = "https://api.example.com/other";
 export const result: Promise<Payload> = inferred.request.get();
 export async function readRoot(): Promise<Payload> {
   const resource = await inferred.request.get();
@@ -338,10 +341,11 @@ export async function readRoot(): Promise<Payload> {
 }
 declare const resource: Payload;
 export const links: Link<{ get: [void, Payload] }>[] = resource.getRel<{ get: [void, Payload] }>("related");
-const bookmarked = fromBookmark<Payload>("https://api.example.com/resources/123");
+const bookmarked = fromHref<Payload>("https://api.example.com/resources/123");
 export const bookmarkLink: Link<{ get: [void, Payload] }> = bookmarked;
 export const bookmarkName: string = bookmarked.name;
 export const bookmarkTitle: string = bookmarked.title;
+export const bookmarkHref: string = bookmarked.href;
 export const bookmarkResult: Promise<Payload> = bookmarked.request.get();
 export async function readBookmark(): Promise<Payload> {
   const resource = await bookmarked.request.get();
@@ -349,10 +353,10 @@ export async function readBookmark(): Promise<Payload> {
   return resource;
 }
 // @ts-expect-error Bookmarks must be strings.
-fromBookmark<Payload>(123);
+fromHref<Payload>(123);
 // @ts-expect-error GET returns the specified resource type.
 export const invalidBookmarkResult: Promise<string> = bookmarked.request.get();
-const untypedBookmark = fromBookmark("https://api.example.com/resources/123");
+const untypedBookmark = fromHref("https://api.example.com/resources/123");
 export const unknownBookmarkResult: Promise<unknown> = untypedBookmark.request.get();
 // @ts-expect-error An omitted resource type cannot imply Payload.
 export const invalidUntypedBookmarkResult: Promise<Payload> = untypedBookmark.request.get();

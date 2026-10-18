@@ -171,23 +171,24 @@ if (createLink) {
 }
 ```
 
-`getRel` returns an array of links with `name`, `title`, and `request` properties.
+`getRel` returns an array of links with `name`, `title`, a readonly `href` string,
+and `request` properties.
 Concrete method tuples specify request bodies and response resources; other
 common HTTP methods accept `unknown` and return `Promise<unknown>`.
 
 To enter the API through an existing resource URL instead of its root, use
-`fromBookmark` with the expected resource type:
+`fromHref` with the expected resource type:
 
 ```ts
-import { fromBookmark } from "restspec";
+import { fromHref } from "restspec";
 import type { Checklist } from "./generated/types.js";
 
-const bookmarkLink = fromBookmark<Checklist>("https://api.example.com/checklists/123");
+const bookmarkLink = fromHref<Checklist>("https://api.example.com/checklists/123");
 const checklist = await bookmarkLink.request.get();
 ```
 
 The resource type is supplied by the caller; it does not validate the response.
 Without a resource type argument, the GET response type is `unknown`.
 
-These examples illustrate the client types only. `fromRoot` and `fromBookmark`
+These examples illustrate the client types only. `fromRoot` and `fromHref`
 are currently stubs and do not yet implement HTTP requests or resource navigation.

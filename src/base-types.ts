@@ -14,6 +14,7 @@ type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'option
 export type Link<TYPES extends Methods = {}> = {
     name: string
     title: string
+    readonly href: string
     request: {
         [method in HttpMethod | keyof TYPES]: (reqBody: method extends keyof TYPES ? TYPES[method][0] : unknown) =>
             Promise<method extends keyof TYPES ? TYPES[method][1] : unknown>
@@ -24,6 +25,6 @@ export function fromRoot<RESOURCE>(root: ApiRoot<RESOURCE>): Link<{ get: [void, 
     return {} as unknown as Link<{ get: [void, RESOURCE] }>
 }
 
-export function fromBookmark<RESOURCE>(bookmark: string): Link<{ get: [void, RESOURCE] }> {
+export function fromHref<RESOURCE>(href: string): Link<{ get: [void, RESOURCE] }> {
     return {} as unknown as Link<{ get: [void, RESOURCE] }>
 }
