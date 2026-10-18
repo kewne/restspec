@@ -5,10 +5,12 @@ import { parseArgs } from "node:util";
 import { generateTypes } from "./generate-types.js";
 
 const usage = `Usage: restspec generate-types <entrypoint> [--profiles <dir>] --out <types.ts>
+       restspec generate-types --config <config.yml> --out <types.ts>
 
 Generate TypeScript types from all application/json schemas in profiles/.
 
 Options:
+  -c, --config <file>   Config YAML file
   -p, --profiles <dir>  Profiles directory (default: profiles/ next to entrypoint)
   -o, --out <file>      Required output TypeScript file
   -h, --help            Show help
@@ -19,6 +21,7 @@ async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
+      config: { type: "string", short: "c" },
       profiles: { type: "string", short: "p" },
       out: { type: "string", short: "o" },
       help: { type: "boolean", short: "h" },
@@ -40,11 +43,25 @@ async function main(): Promise<void> {
   }
 
   const [command, entrypointPath] = positionals;
+  if (command !== "generate-types" || !values.out?.trim()) {
+    throw new Error(usage.trimEnd());
+  }
+
+  if (values.config !== undefined) {
+    if (
+      !values.config.trim() ||
+      positionals.length !== 1 ||
+      values.profiles !== undefined
+    ) {
+      throw new Error(usage.trimEnd());
+    }
+    await generateTypes({ configPath: values.config, outputPath: values.out });
+    return;
+  }
+
   if (
-    command !== "generate-types" ||
-    !entrypointPath ||
+    !entrypointPath?.trim() ||
     positionals.length !== 2 ||
-    !values.out?.trim() ||
     (values.profiles !== undefined && !values.profiles.trim())
   ) {
     throw new Error(usage.trimEnd());

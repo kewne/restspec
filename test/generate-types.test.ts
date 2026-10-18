@@ -1,8 +1,10 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { execFile, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:https";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, onTestFinished, test } from "vitest";
 import { stringify } from "yaml";
 
@@ -576,7 +578,8 @@ test.each<[label: string, change: (project: Fixture) => Promise<unknown>, expect
   ["missing relation target", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{}] } }), /rels.related.profile must be a nonempty string/],
   ["invalid relation name", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{ name: 123, profile: rootProfile }] } }), /rels.related.name must be a nonempty string/],
   ["no JSON schemas", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: {} }), /no application\/json schemas found/],
-  ["remote reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "https://example.invalid/schema.json" })), /Only local schema references are supported/],
+  ["http schema reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "http://example.invalid/schema.json" })), /Only file: and https: schema references are supported/],
+  ["unreachable https schema reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "https://127.0.0.1:1/schema.json" })), /Could not fetch schema https:\/\/127\.0\.0\.1:1\/schema\.json/],
 ])("reports %s without replacing existing output", async (_label, change, expected) => {
   const project = await fixture();
   await project.put("generated/types.ts", "existing output\n");
@@ -681,10 +684,242 @@ test.each(["--profiles", "-p"])("reads profiles from a custom directory with %s"
   expect(await readFile(absoluteOutput, "utf8")).toBe(types);
 });
 
+async function httpsServer(
+  routesOrFactory:
+    | Readonly<Record<string, string | { status?: number; body: string }>>
+    | ((baseUrl: string) => Readonly<Record<string, string | { status?: number; body: string }>>),
+): Promise<{
+  baseUrl: string;
+  invoke: (args: readonly string[], cwd?: string) => Promise<{ status: number; stdout: string; stderr: string }>;
+}> {
+  const certDir = await temporaryDirectory();
+  const keyPath = join(certDir, "key.pem");
+  const certPath = join(certDir, "cert.pem");
+  const gen = spawnSync(
+    "openssl",
+    [
+      "req", "-x509", "-newkey", "rsa:2048",
+      "-keyout", keyPath, "-out", certPath,
+      "-days", "1", "-nodes", "-subj", "/CN=127.0.0.1",
+      "-addext", "subjectAltName=IP:127.0.0.1",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(gen.status, gen.stderr).toBe(0);
+  const [key, cert] = await Promise.all([
+    readFile(keyPath, "utf8"),
+    readFile(certPath, "utf8"),
+  ]);
+  let baseUrl = "";
+  const server = createServer({ key, cert }, (req, res) => {
+    const routes = typeof routesOrFactory === "function"
+      ? routesOrFactory(baseUrl)
+      : routesOrFactory;
+    const pathname = new URL(req.url ?? "/", baseUrl).pathname;
+    const route = routes[pathname];
+    if (route === undefined) {
+      res.writeHead(404).end("Not found");
+      return;
+    }
+    if (typeof route === "string") {
+      res.writeHead(200).end(route);
+      return;
+    }
+    res.writeHead(route.status ?? 200).end(route.body);
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  onTestFinished(
+    () => new Promise<void>((resolveClose) => server.close(() => resolveClose())),
+  );
+  const { port } = server.address() as AddressInfo;
+  baseUrl = `https://127.0.0.1:${port}`;
+  return {
+    baseUrl,
+    invoke: (args, cwd = root) =>
+      new Promise((resolveExec) => {
+        execFile(
+          process.execPath,
+          [cli, ...args],
+          {
+            cwd,
+            encoding: "utf8",
+            timeout: 20_000,
+            env: {
+              ...process.env,
+              NODE_EXTRA_CA_CERTS: certPath,
+              NO_PROXY: "*",
+              no_proxy: "*",
+            },
+          },
+          (error, stdout, stderr) => {
+            const status = error && typeof error.code === "number" ? error.code : error ? 1 : 0;
+            resolveExec({ status, stdout, stderr });
+          },
+        );
+      }),
+  };
+}
+
+test.each(["--config", "-c"])("generates types from a config file with %s using local paths and file: URLs", async (flag) => {
+  const project = await fixture();
+  await project.put("profiles/ignored.yml", {
+    profile: "https://example.test/profiles/ignored",
+    schema: { "application/json": "../schemas/ignored.json" },
+  });
+  await project.put("schemas/ignored.json", JSON.stringify({ title: "Ignored", type: "boolean" }));
+  const fileUrlProfile = pathToFileURL(join(project.directory, "profiles/file-url.yml")).href;
+  await project.put("profiles/file-url.yml", {
+    profile: fileUrlProfile,
+    schema: { "application/json": "../schemas/extra.json" },
+  });
+  await project.put("schemas/extra.json", JSON.stringify({ title: "Extra", type: "number" }));
+
+  const configPath = await project.put("configs/restspec-config.yml", {
+    entrypoint: "../restspec.yml",
+    profiles: [
+      {
+        url: rootProfile,
+        location: "../profiles/root.yml",
+      },
+      fileUrlProfile,
+    ],
+  });
+
+  const result = invoke(["generate-types", flag, configPath, "--out", project.output], tmpdir());
+  success(result);
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain("export interface Payload");
+  expect(types).toContain("export interface Extra");
+  expect(types).not.toContain("Ignored");
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
+});
+
+test("dereferences https: URLs for entrypoint, profiles, and schemas in config", async () => {
+  const project = await fixture();
+  const mappedProfileUrl = "https://example.test/profiles/mapped";
+  const remote = await httpsServer((origin) => ({
+    "/restspec.yml": stringify({
+      env: { production: { url: "https://example.test/" } },
+      rootProfile: `${origin}/profiles/root`,
+    }),
+    "/profiles/root": stringify({
+      profile: `${origin}/profiles/root`,
+      schema: { "application/json": "../schemas/root.json" },
+      rels: {
+        related: [{ name: "mapped", profile: mappedProfileUrl }],
+      },
+    }),
+    "/profiles/mapped.yml": stringify({
+      profile: mappedProfileUrl,
+      schema: { "application/json": "../schemas/mapped.json" },
+    }),
+    "/schemas/root.json": JSON.stringify({
+      title: "RemoteRoot",
+      type: "object",
+      properties: { child: { $ref: "./child.json" } },
+      required: ["child"],
+      additionalProperties: false,
+    }),
+    "/schemas/child.json": JSON.stringify({
+      type: "object",
+      properties: { value: { type: "string" } },
+      required: ["value"],
+      additionalProperties: false,
+    }),
+    "/schemas/mapped.json": JSON.stringify({
+      title: "MappedResource",
+      type: "boolean",
+    }),
+  }));
+
+  const configPath = await project.put("config.yml", {
+    entrypoint: `${remote.baseUrl}/restspec.yml`,
+    profiles: [
+      `${remote.baseUrl}/profiles/root`,
+      {
+        url: mappedProfileUrl,
+        location: `${remote.baseUrl}/profiles/mapped.yml`,
+      },
+    ],
+  });
+
+  const result = await remote.invoke(["generate-types", "--config", configPath, "--out", project.output]);
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stderr).toBe("");
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain("export interface RemoteRoot");
+  expect(types).toContain("export interface MappedResource");
+  expect(types).toMatch(/get "mapped"\(\): Link<\{ get: \[void, MappedResource\] \}>;/);
+  expect(types).toContain("export const root: ApiRoot<RemoteRoot, { production: string; }> = {");
+});
+
+test("protects config file from being overwritten by output", async () => {
+  const project = await fixture();
+  const configPath = await project.put("config.ts", stringify({
+    entrypoint: "./restspec.yml",
+    profiles: [{ url: rootProfile, location: "./profiles/root.yml" }],
+  }));
+  const original = await readFile(configPath, "utf8");
+  const result = invoke(["generate-types", "--config", configPath, "--out", configPath]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toMatch(/output would overwrite an input file/);
+  expect(await readFile(configPath, "utf8")).toBe(original);
+});
+
+test.each<[label: string, config: unknown, expected: RegExp]>([
+  ["non-mapping config", "- invalid\n", /expected a YAML mapping/],
+  ["missing entrypoint", { profiles: [] }, /entrypoint must be a nonempty string/],
+  ["blank entrypoint", { entrypoint: "  ", profiles: [] }, /entrypoint must be a nonempty string/],
+  ["http entrypoint URL", { entrypoint: "http://example.test/restspec.yml", profiles: [] }, /Only file: and https: URLs are supported/],
+  ["missing profiles", { entrypoint: "./restspec.yml" }, /profiles must be an array/],
+  ["non-array profiles", { entrypoint: "./restspec.yml", profiles: {} }, /profiles must be an array/],
+  ["invalid profile entry type", { entrypoint: "./restspec.yml", profiles: [123] }, /profiles\[0\] must be a URL string or a mapping/],
+  ["blank profile URL string", { entrypoint: "./restspec.yml", profiles: ["  "] }, /profiles\[0\] must be a nonempty string/],
+  ["non-URL profile string", { entrypoint: "./restspec.yml", profiles: ["./profiles/root.yml"] }, /profiles\[0\] must be a URL/],
+  ["http profile URL string", { entrypoint: "./restspec.yml", profiles: ["http://example.test/profiles/root.yml"] }, /Only file: and https: URLs are supported/],
+  ["missing profile object url", { entrypoint: "./restspec.yml", profiles: [{ location: "./profiles/root.yml" }] }, /profiles\[0\]\.url must be a nonempty string/],
+  ["non-URL profile object url", { entrypoint: "./restspec.yml", profiles: [{ url: "not a url", location: "./profiles/root.yml" }] }, /profiles\[0\]\.url must be a URL/],
+  ["missing profile object location", { entrypoint: "./restspec.yml", profiles: [{ url: rootProfile }] }, /profiles\[0\]\.location must be a nonempty string/],
+  ["http profile object location", { entrypoint: "./restspec.yml", profiles: [{ url: rootProfile, location: "http://example.test/root.yml" }] }, /Only file: and https: URLs are supported/],
+  ["mismatched profile url", { entrypoint: "./restspec.yml", profiles: [{ url: "https://example.test/profiles/wrong", location: "./profiles/root.yml" }] }, /does not match configured url/],
+  [
+    "duplicate profile entries",
+    {
+      entrypoint: "./restspec.yml",
+      profiles: [
+        { url: rootProfile, location: "./profiles/root.yml" },
+        { url: rootProfile, location: "./profiles/root.yml" },
+      ],
+    },
+    /duplicate profile URI/,
+  ],
+])("reports %s in config file", async (_label, configContent, expected) => {
+  const project = await fixture();
+  const configPath = await project.put("config.yml", configContent);
+  const result = invoke(["generate-types", "--config", configPath, "--out", project.output]);
+  expect(result.status).toBe(1);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toMatch(expected);
+  expect(result.stderr).not.toMatch(/\n\s+at /);
+});
+
+test("reports HTTP status errors when dereferencing https: URLs", async () => {
+  const project = await fixture();
+  const remote = await httpsServer({});
+  const configPath = await project.put("config.yml", {
+    entrypoint: `${remote.baseUrl}/missing.yml`,
+    profiles: [],
+  });
+  const result = await remote.invoke(["generate-types", "--config", configPath, "--out", project.output]);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toMatch(/HTTP 404/);
+});
+
 test("shows help and package version", async () => {
   const help = invoke(["--help"]);
   success(help);
   expect(help.stdout).toMatch(/Usage: restspec generate-types <entrypoint> \[--profiles <dir>\] --out <types\.ts>/);
+  expect(help.stdout).toContain("-c, --config <file>");
   expect(help.stdout).toContain("-p, --profiles <dir>");
   const version = invoke(["--version"]);
   success(version);
@@ -703,6 +938,11 @@ test.each([
   { args: ["generate-types", "spec.yml", "--profiles", "", "--out", "types.ts"] },
   { args: ["generate-types", "spec.yml", "-p", "   ", "--out", "types.ts"] },
   { args: ["generate-types", "spec.yml", "--profiles"] },
+  { args: ["generate-types", "--config", "", "--out", "types.ts"] },
+  { args: ["generate-types", "-c", "   ", "--out", "types.ts"] },
+  { args: ["generate-types", "--config", "config.yml"] },
+  { args: ["generate-types", "spec.yml", "--config", "config.yml", "--out", "types.ts"] },
+  { args: ["generate-types", "--config", "config.yml", "--profiles", "profiles", "--out", "types.ts"] },
 ])("rejects invalid invocation $args", ({ args }) => {
   const result = invoke(args);
   expect(result.status).toBe(1);

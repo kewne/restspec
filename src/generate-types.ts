@@ -7,8 +7,20 @@ import { TypeScriptTypesLanguage } from "./typescript-types.js";
 
 type Schema = Record<string, unknown> | boolean;
 
+type Location =
+  | { kind: "file"; path: string; label: string; url: string }
+  | { kind: "https"; label: string; url: string };
+
+export type GenerateTypesOptions =
+  | { entrypointPath: string; profilesPath?: string; outputPath: string }
+  | { configPath: string; outputPath: string };
+
 function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isUrl(value: string): boolean {
+  return !/^[a-zA-Z]:[\\/]/.test(value) && URL.canParse(value);
 }
 
 function requiredString(value: unknown, field: string, path: string): string {
@@ -18,14 +30,70 @@ function requiredString(value: unknown, field: string, path: string): string {
   return value;
 }
 
-async function readMapping(path: string): Promise<Record<string, unknown>> {
-  const document = parseDocument(await readFile(path, "utf8"));
+async function resolveUrlLocation(rawUrl: string, inputs: Set<string>): Promise<Location> {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol === "https:") {
+    return { kind: "https", label: parsed.href, url: parsed.href };
+  }
+  if (parsed.protocol === "file:") {
+    const path = await realpath(fileURLToPath(parsed));
+    inputs.add(path);
+    return { kind: "file", path, label: path, url: pathToFileURL(path).href };
+  }
+  throw new Error(`Only file: and https: URLs are supported: ${rawUrl}`);
+}
+
+async function resolveLocation(
+  rawLocation: string,
+  baseDir: string,
+  inputs: Set<string>,
+): Promise<Location> {
+  if (isUrl(rawLocation)) {
+    return resolveUrlLocation(rawLocation, inputs);
+  }
+  const resolved = resolve(baseDir, rawLocation);
+  const path = await realpath(resolved);
+  inputs.add(path);
+  return { kind: "file", path, label: path, url: pathToFileURL(path).href };
+}
+
+async function resolveSchemaLocation(
+  rawSchema: string,
+  profileLocation: Location,
+  inputs: Set<string>,
+): Promise<Location> {
+  if (profileLocation.kind === "file") {
+    return resolveLocation(rawSchema, dirname(profileLocation.path), inputs);
+  }
+  const parsed = new URL(rawSchema, profileLocation.url);
+  return resolveUrlLocation(parsed.href, inputs);
+}
+
+async function readText(location: Location): Promise<string> {
+  if (location.kind === "file") {
+    return readFile(location.path, "utf8");
+  }
+  let response: Response;
+  try {
+    response = await fetch(location.url);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`${location.url}: ${detail}`, { cause: error });
+  }
+  if (!response.ok) {
+    throw new Error(`${location.url}: HTTP ${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
+async function readMapping(location: Location): Promise<Record<string, unknown>> {
+  const document = parseDocument(await readText(location));
   if (document.errors.length > 0) {
-    throw new Error(`${path}: ${document.errors[0]?.message}`);
+    throw new Error(`${location.label}: ${document.errors[0]?.message}`);
   }
   const value: unknown = document.toJS();
   if (!isMapping(value)) {
-    throw new Error(`${path}: expected a YAML mapping`);
+    throw new Error(`${location.label}: expected a YAML mapping`);
   }
   return value;
 }
@@ -54,156 +122,242 @@ class LocalSchemaStore extends JSONSchemaStore {
     if (!URL.canParse(address)) {
       return undefined;
     }
-    if (!address.startsWith("file:")) {
-      throw new Error(`Only local schema references are supported: ${address}`);
+    const parsed = new URL(address);
+    if (parsed.protocol !== "file:" && parsed.protocol !== "https:") {
+      throw new Error(`Only file: and https: schema references are supported: ${address}`);
     }
     return super.get(address, debugPrint);
   }
 
   async fetch(address: string): Promise<Schema> {
-    if (!address.startsWith("file:")) {
-      throw new Error(`Only local schema references are supported: ${address}`);
-    }
-    const resource = this.resourceSchemas.get(fileURLToPath(address));
+    const resource = this.resourceSchemas.get(address);
     if (resource !== undefined) {
       return resource;
     }
-    const path = await realpath(fileURLToPath(address));
-    this.inputs.add(path);
-    const content = await readFile(path, "utf8");
+    const parsed = new URL(address);
+    let label: string;
+    let content: string;
+    if (parsed.protocol === "file:") {
+      const path = await realpath(fileURLToPath(parsed));
+      this.inputs.add(path);
+      label = path;
+      content = await readFile(path, "utf8");
+    } else if (parsed.protocol === "https:") {
+      label = parsed.href;
+      content = await readText({ kind: "https", label, url: parsed.href });
+    } else {
+      throw new Error(`Only file: and https: schema references are supported: ${address}`);
+    }
     let schema: unknown;
     try {
       schema = JSON.parse(content);
     } catch (error) {
-      throw new Error(`${path}: invalid JSON`, { cause: error });
+      throw new Error(`${label}: invalid JSON`, { cause: error });
     }
     if (typeof schema !== "boolean" && !isMapping(schema)) {
-      throw new Error(`${path}: expected a JSON Schema object or boolean`);
+      throw new Error(`${label}: expected a JSON Schema object or boolean`);
     }
     return schema;
   }
 }
 
 export async function generateTypes(
-  entrypointPath: string,
-  outputPath: string,
+  entrypointOrOptions: string | GenerateTypesOptions,
+  outputPath?: string,
   profilesPath?: string,
 ): Promise<void> {
-  const entrypointFile = await realpath(resolve(entrypointPath));
-  const spec = await readMapping(entrypointFile);
+  const options: GenerateTypesOptions = typeof entrypointOrOptions === "string"
+    ? {
+        entrypointPath: entrypointOrOptions,
+        outputPath: outputPath!,
+        ...(profilesPath === undefined ? {} : { profilesPath }),
+      }
+    : entrypointOrOptions;
+
+  const inputs = new Set<string>();
+  let entrypointLocation: Location;
+  const profileEntries: { location: Location; expectedUrl?: string }[] = [];
+
+  if ("configPath" in options) {
+    const configFile = await realpath(resolve(options.configPath));
+    inputs.add(configFile);
+    const config = await readMapping({
+      kind: "file",
+      path: configFile,
+      label: configFile,
+      url: pathToFileURL(configFile).href,
+    });
+    const configDir = dirname(configFile);
+    const rawEntrypoint = requiredString(config.entrypoint, "entrypoint", configFile);
+    entrypointLocation = await resolveLocation(rawEntrypoint, configDir, inputs);
+    if (!Array.isArray(config.profiles)) {
+      throw new Error(`${configFile}: profiles must be an array`);
+    }
+    for (const [index, entry] of config.profiles.entries()) {
+      if (typeof entry === "string") {
+        const url = requiredString(entry, `profiles[${index}]`, configFile);
+        if (!isUrl(url)) {
+          throw new Error(`${configFile}: profiles[${index}] must be a URL`);
+        }
+        const location = await resolveUrlLocation(url, inputs);
+        profileEntries.push({ location, expectedUrl: url });
+      } else if (isMapping(entry)) {
+        const url = requiredString(entry.url, `profiles[${index}].url`, configFile);
+        if (!isUrl(url)) {
+          throw new Error(`${configFile}: profiles[${index}].url must be a URL`);
+        }
+        const rawLocation = requiredString(entry.location, `profiles[${index}].location`, configFile);
+        const location = await resolveLocation(rawLocation, configDir, inputs);
+        profileEntries.push({ location, expectedUrl: url });
+      } else {
+        throw new Error(`${configFile}: profiles[${index}] must be a URL string or a mapping`);
+      }
+    }
+  } else {
+    const entrypointFile = await realpath(resolve(options.entrypointPath));
+    inputs.add(entrypointFile);
+    entrypointLocation = {
+      kind: "file",
+      path: entrypointFile,
+      label: entrypointFile,
+      url: pathToFileURL(entrypointFile).href,
+    };
+    const profilesDir = options.profilesPath !== undefined
+      ? resolve(options.profilesPath)
+      : join(dirname(entrypointFile), "profiles");
+    const files = await profileFiles(profilesDir);
+    for (const file of files) {
+      const resolvedFile = await realpath(file);
+      inputs.add(resolvedFile);
+      profileEntries.push({
+        location: {
+          kind: "file",
+          path: resolvedFile,
+          label: file,
+          url: pathToFileURL(resolvedFile).href,
+        },
+      });
+    }
+  }
+
+  const entrypointLabel = entrypointLocation.label;
+  const spec = await readMapping(entrypointLocation);
   if (!isMapping(spec.env) || Object.keys(spec.env).length === 0) {
-    throw new Error(`${entrypointFile}: env must be a nonempty environment mapping`);
+    throw new Error(`${entrypointLabel}: env must be a nonempty environment mapping`);
   }
   const env: Record<string, { url: string; description?: string }> = {};
   for (const [name, value] of Object.entries(spec.env)) {
-    const key = requiredString(name, "env key", entrypointFile);
+    const key = requiredString(name, "env key", entrypointLabel);
     if (!isMapping(value)) {
-      throw new Error(`${entrypointFile}: env.${key} must be a mapping`);
+      throw new Error(`${entrypointLabel}: env.${key} must be a mapping`);
     }
     const description = value.description === undefined
       ? undefined
-      : requiredString(value.description, `env.${key}.description`, entrypointFile);
+      : requiredString(value.description, `env.${key}.description`, entrypointLabel);
     env[key] = {
-      url: requiredString(value.url, `env.${key}.url`, entrypointFile),
+      url: requiredString(value.url, `env.${key}.url`, entrypointLabel),
       ...(description === undefined ? {} : { description }),
     };
   }
-  const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointFile);
-  const profilesDir = profilesPath !== undefined
-    ? resolve(profilesPath)
-    : join(dirname(entrypointFile), "profiles");
-  const files = await profileFiles(profilesDir);
+  const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointLabel);
   const profiles = new Map<string, string>();
   const profileSchemas = new Map<string, string>();
   const profileRelations = new Map<string, { relation: string; name: string; profile: string }[]>();
-  const schemaFiles = new Set<string>();
-  const inputs = new Set([entrypointFile]);
+  const schemaLocations = new Map<string, Location>();
   let rootSchema: string | undefined;
 
-  for (const file of files) {
-    inputs.add(await realpath(file));
-    const profile = await readMapping(file);
-    const uri = requiredString(profile.profile, "profile", file);
-    if (profiles.has(uri)) {
-      throw new Error(`${file}: duplicate profile URI ${uri} (also in ${profiles.get(uri)})`);
+  for (const { location, expectedUrl } of profileEntries) {
+    const label = location.label;
+    const profile = await readMapping(location);
+    const uri = requiredString(profile.profile, "profile", label);
+    if (expectedUrl !== undefined && uri !== expectedUrl) {
+      throw new Error(`${label}: profile ${uri} does not match configured url ${expectedUrl}`);
     }
-    profiles.set(uri, file);
+    if (profiles.has(uri)) {
+      throw new Error(`${label}: duplicate profile URI ${uri} (also in ${profiles.get(uri)})`);
+    }
+    profiles.set(uri, label);
     const relations: { relation: string; name: string; profile: string }[] = [];
     profileRelations.set(uri, relations);
     if (profile.rels !== undefined) {
       if (!isMapping(profile.rels)) {
-        throw new Error(`${file}: rels must be a relation-type mapping`);
+        throw new Error(`${label}: rels must be a relation-type mapping`);
       }
       for (const [relation, descriptions] of Object.entries(profile.rels)) {
         if (!Array.isArray(descriptions)) {
-          throw new Error(`${file}: rels.${relation} must be an array`);
+          throw new Error(`${label}: rels.${relation} must be an array`);
         }
         for (const description of descriptions) {
           if (!isMapping(description)) {
-            throw new Error(`${file}: rels.${relation} entries must be mappings`);
+            throw new Error(`${label}: rels.${relation} entries must be mappings`);
           }
-          const target = requiredString(description.profile, `rels.${relation}.profile`, file);
+          const target = requiredString(description.profile, `rels.${relation}.profile`, label);
           if (description.name !== undefined) {
-            const name = requiredString(description.name, `rels.${relation}.name`, file);
+            const name = requiredString(description.name, `rels.${relation}.name`, label);
             relations.push({ relation, name, profile: target });
           }
         }
       }
     }
     if (!isMapping(profile.schema)) {
-      throw new Error(`${file}: schema must be a media-type mapping`);
+      throw new Error(`${label}: schema must be a media-type mapping`);
     }
     const schema = profile.schema["application/json"];
     if (schema !== undefined) {
-      const relativePath = requiredString(schema, "schema.application/json", file);
-      const schemaFile = await realpath(resolve(dirname(file), relativePath));
-      schemaFiles.add(schemaFile);
-      profileSchemas.set(uri, schemaFile);
+      const relativePath = requiredString(schema, "schema.application/json", label);
+      const schemaLocation = await resolveSchemaLocation(relativePath, location, inputs);
+      schemaLocations.set(schemaLocation.url, schemaLocation);
+      profileSchemas.set(uri, schemaLocation.url);
       if (uri === rootProfile) {
-        rootSchema = schemaFile;
+        rootSchema = schemaLocation.url;
       }
     }
   }
 
   if (!profiles.has(rootProfile)) {
-    throw new Error(`${entrypointFile}: rootProfile ${rootProfile} has no local profile`);
+    throw new Error(`${entrypointLabel}: rootProfile ${rootProfile} has no local profile`);
   }
-  if (schemaFiles.size === 0) {
-    throw new Error(`${entrypointFile}: no application/json schemas found`);
+  if (schemaLocations.size === 0) {
+    throw new Error(`${entrypointLabel}: no application/json schemas found`);
   }
 
   const store = new LocalSchemaStore();
   const schemaInput = new JSONSchemaInput(store);
   const names = new Map<string, string>();
+  const sourceNames = new Map<string, string>();
   let rootSourceName: string | undefined;
-  for (const file of schemaFiles) {
-    const uri = pathToFileURL(file).href;
+  for (const schemaLocation of schemaLocations.values()) {
+    const uri = schemaLocation.url;
+    const label = schemaLocation.label;
     const schema = await store.fetch(uri);
     const title = isMapping(schema) ? schema.title : undefined;
+    const fallbackName = schemaLocation.kind === "file"
+      ? basename(schemaLocation.path).replace(/\.json$/i, "")
+      : decodeURIComponent(basename(new URL(schemaLocation.url).pathname)).replace(/\.json$/i, "");
     const name = title !== undefined
-      ? requiredString(title, "schema title", file)
-      : basename(file).replace(/\.json$/i, "");
+      ? requiredString(title, "schema title", label)
+      : requiredString(fallbackName, "schema name", label);
     if (names.has(name)) {
-      throw new Error(`${file}: duplicate schema type name ${name} (also in ${names.get(name)})`);
+      throw new Error(`${label}: duplicate schema type name ${name} (also in ${names.get(name)})`);
     }
-    names.set(name, file);
-    if (file === rootSchema) {
+    names.set(name, label);
+    sourceNames.set(uri, name);
+    if (uri === rootSchema) {
       rootSourceName = name;
     }
-    const resourcePath = `${file}.restspec-resource`;
-    store.resourceSchemas.set(resourcePath, {
+    const resourceUri = `${uri}.restspec-resource`;
+    store.resourceSchemas.set(resourceUri, {
       title: name,
       type: "object",
       properties: { properties: { $ref: uri } },
       required: ["properties"],
       additionalProperties: false,
     });
-    await schemaInput.addSource({ name, uris: [pathToFileURL(resourcePath).href] });
+    await schemaInput.addSource({ name, uris: [resourceUri] });
   }
 
   const inputData = new InputData();
   inputData.addInput(schemaInput);
-  const sourceNames = new Map([...names].map(([name, file]) => [file, name]));
   const relations = new Map<string, { relation: string; name: string; sourceName: string | undefined }[]>();
   for (const [profile, descriptions] of profileRelations) {
     const schema = profileSchemas.get(profile);
@@ -228,7 +382,7 @@ export async function generateTypes(
     inferDateTimes: false,
   });
 
-  const output = resolve(outputPath);
+  const output = resolve(options.outputPath);
   if (extname(output) !== ".ts") {
     throw new Error(`${output}: output must have a .ts extension`);
   }
