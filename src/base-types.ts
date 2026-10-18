@@ -23,3 +23,7 @@ export type Link<TYPES extends Methods = {}> = {
 export function fromRoot<RESOURCE>(root: ApiRoot<RESOURCE>): Link<{ get: [void, RESOURCE] }> {
     return {} as unknown as Link<{ get: [void, RESOURCE] }>
 }
+
+export function fromBookmark<RESOURCE>(bookmark: string): Link<{ get: [void, RESOURCE] }> {
+    return {} as unknown as Link<{ get: [void, RESOURCE] }>
+}

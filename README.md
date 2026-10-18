@@ -175,5 +175,19 @@ if (createLink) {
 Concrete method tuples specify request bodies and response resources; other
 common HTTP methods accept `unknown` and return `Promise<unknown>`.
 
-This illustrates the client types only. `fromRoot` is currently a stub and does
-not yet implement HTTP requests or resource navigation.
+To enter the API through an existing resource URL instead of its root, use
+`fromBookmark` with the expected resource type:
+
+```ts
+import { fromBookmark } from "restspec";
+import type { Checklist } from "./generated/types.js";
+
+const bookmarkLink = fromBookmark<Checklist>("https://api.example.com/checklists/123");
+const checklist = await bookmarkLink.request.get();
+```
+
+The resource type is supplied by the caller; it does not validate the response.
+Without a resource type argument, the GET response type is `unknown`.
+
+These examples illustrate the client types only. `fromRoot` and `fromBookmark`
+are currently stubs and do not yet implement HTTP requests or resource navigation.

@@ -321,7 +321,7 @@ test("root export resolves ApiRoot from the packed package", async () => {
   ], { encoding: "utf8" });
   success(extracted);
   await project.put("package.json", { type: "module" });
-  const consumer = await project.put("consumer.ts", `import { fromRoot } from "restspec";
+  const consumer = await project.put("consumer.ts", `import { fromBookmark, fromRoot } from "restspec";
 import type { ApiRoot, Link } from "restspec";
 import { root } from "./generated/types.js";
 import type { Payload } from "./generated/types.js";
@@ -338,6 +338,24 @@ export async function readRoot(): Promise<Payload> {
 }
 declare const resource: Payload;
 export const links: Link<{ get: [void, Payload] }>[] = resource.getRel<{ get: [void, Payload] }>("related");
+const bookmarked = fromBookmark<Payload>("https://api.example.com/resources/123");
+export const bookmarkLink: Link<{ get: [void, Payload] }> = bookmarked;
+export const bookmarkName: string = bookmarked.name;
+export const bookmarkTitle: string = bookmarked.title;
+export const bookmarkResult: Promise<Payload> = bookmarked.request.get();
+export async function readBookmark(): Promise<Payload> {
+  const resource = await bookmarked.request.get();
+  const id: string = resource.properties.id;
+  return resource;
+}
+// @ts-expect-error Bookmarks must be strings.
+fromBookmark<Payload>(123);
+// @ts-expect-error GET returns the specified resource type.
+export const invalidBookmarkResult: Promise<string> = bookmarked.request.get();
+const untypedBookmark = fromBookmark("https://api.example.com/resources/123");
+export const unknownBookmarkResult: Promise<unknown> = untypedBookmark.request.get();
+// @ts-expect-error An omitted resource type cannot imply Payload.
+export const invalidUntypedBookmarkResult: Promise<Payload> = untypedBookmark.request.get();
 `);
   for (const [module, resolution] of [["NodeNext", "NodeNext"], ["ES2022", "node"]]) {
     const compiled = spawnSync(process.execPath, [
