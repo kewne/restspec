@@ -39,8 +39,8 @@ function success(result: SpawnSyncReturns<string>): void {
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "restspec-"));
   onTestFinished(() => rm(directory, { recursive: true, force: true }));
-  await mkdir(join(directory, "node_modules"));
-  await symlink(root, join(directory, "node_modules/restspec"), "dir");
+  await mkdir(join(directory, "node_modules/@kewne"), { recursive: true });
+  await symlink(root, join(directory, "node_modules/@kewne/restspec"), "dir");
   return directory;
 }
 
@@ -153,7 +153,7 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   const types = await readFile(project.output, "utf8");
   expect(types.match(/getRel<METHODS extends Methods>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
   expect(types).toContain("get rels(): {");
-  const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "restspec";
+  const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "@kewne/restspec";
 import type { Payload, Child } from "./generated/types.js";
 declare const resource: Payload;
 export const properties: string = resource.properties.id;
@@ -197,7 +197,7 @@ export const searched: Promise<Child> = customMethod.request.search({ query: "ch
   ], { encoding: "utf8" });
   expect(compiled.error).toBeUndefined();
   expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
-  await project.put("consumer.ts", `import type { Link } from "restspec";
+  await project.put("consumer.ts", `import type { Link } from "@kewne/restspec";
 import type { Payload } from "./generated/types.js";
 declare const resource: Payload;
 resource.getRel<{ get: string }>("related");
@@ -231,7 +231,7 @@ test("root export uses the generated root schema type name", async () => {
   const project = await fixture({ ...basicSchema, title: "Root payload" });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toContain('import type { ApiRoot, Link, Methods } from "restspec";');
+  expect(types).toContain('import type { ApiRoot, Link, Methods } from "@kewne/restspec";');
   expect(types).toContain("export interface RootPayload");
   expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; }> = {");
   expect(types).toContain(`    env: {
@@ -362,7 +362,7 @@ test("root export resolves ApiRoot from the packed package", async () => {
   expect(packed.status, packed.stdout + packed.stderr).toBe(0);
   const packages: { filename: string }[] = JSON.parse(packed.stdout);
   expect(packages).toHaveLength(1);
-  const packageDirectory = join(project.directory, "node_modules/restspec");
+  const packageDirectory = join(project.directory, "node_modules/@kewne/restspec");
   await rm(packageDirectory);
   await mkdir(packageDirectory);
   const extracted = spawnSync("tar", [
@@ -371,8 +371,8 @@ test("root export resolves ApiRoot from the packed package", async () => {
   ], { encoding: "utf8" });
   success(extracted);
   await project.put("package.json", { type: "module" });
-  const consumer = await project.put("consumer.ts", `import { fromHref, fromRoot } from "restspec";
-import type { ApiRoot, Link } from "restspec";
+  const consumer = await project.put("consumer.ts", `import { fromHref, fromRoot } from "@kewne/restspec";
+import type { ApiRoot, Link } from "@kewne/restspec";
 import { root } from "./generated/types.js";
 import type { Payload } from "./generated/types.js";
 export const entry: ApiRoot<Payload, { staging: string; production: string }> = root;
@@ -479,8 +479,8 @@ test("generates all example types as deterministic, strict-compilable exports", 
   expect(await readFile(output, "utf8")).toBe(types);
 
   const consumer = join(directory, "consumer.ts");
-  await writeFile(consumer, `import { fromRoot } from "restspec";
-import type { ApiRoot } from "restspec";
+  await writeFile(consumer, `import { fromRoot } from "@kewne/restspec";
+import type { ApiRoot } from "@kewne/restspec";
 import { root } from "./types.js";
 import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
 export const entry: ApiRoot<Root, { local: string; staging: string; production: string }> = root;

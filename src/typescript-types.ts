@@ -140,7 +140,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
   }
 
   protected override emitTypes(): void {
-    this.emitLine('import type { ApiRoot, Link, Methods } from "restspec";');
+    this.emitLine('import type { ApiRoot, Link, Methods } from "@kewne/restspec";');
     this.ensureBlankLine();
     this.forEachTopLevel("none", (type) => {
       if (type instanceof ObjectType) {
