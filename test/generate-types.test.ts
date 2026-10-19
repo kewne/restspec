@@ -174,8 +174,8 @@ resource.rels = resource.rels;
 const incorrectTarget: Promise<Payload> = resource.rels.related.child.request.get();
 type CreateMethods = { post: [{ label: string }, Child] };
 export const links: Link<CreateMethods>[] = resource.getRel<CreateMethods>("create-from");
-export const name: string = links[0].name;
-export const title: string = links[0].title;
+export const name: string | undefined = links[0].name;
+export const title: string | undefined = links[0].title;
 export const created: Promise<Child> = links[0].request.post({ label: "child" });
 export const parent: Promise<Payload> = ({} as Child).getRel<{ get: [void, Payload] }>("related")[0].request.get();
 export const custom: Link<Methods>[] = resource.getRel<Methods>("urn:custom");
@@ -219,7 +219,7 @@ resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.pos
   expect(invalid.error).toBeUndefined();
   expect(invalid.status).not.toBe(0);
   expect(invalid.stdout).toContain("does not satisfy the constraint 'Methods'");
-  expect(invalid.stdout).toContain("name, title");
+  expect(invalid.stdout).toContain("href");
   expect(invalid.stdout).toContain("Property 'get' does not exist");
   expect(invalid.stdout).toContain("Argument of type 'string' is not assignable to parameter of type 'void'");
   expect(invalid.stdout).toContain("Type 'Promise<unknown>' is not assignable to type 'Promise<string>'");
@@ -379,6 +379,24 @@ export const entry: ApiRoot<Payload, { staging: string; production: string }> = 
 export const genericEntry: ApiRoot<Payload> = root;
 const inferred = fromRoot(root, "staging");
 export const productionLink: Link<{ get: [void, Payload] }> = fromRoot(root, "production");
+export const authenticatedRoot: Link<{ get: [void, Payload] }> = fromRoot(root, "staging", {
+  credentials: { type: "bearer", token: "example-token" },
+});
+export const mappedRoot = fromRoot(root, "staging", {
+  credentials: { "https://example.test": { type: "bearer", token: "example-token" } },
+});
+export const authenticatedBookmark: Link<{ get: [void, Payload] }> = fromHref<Payload>(root.env.staging, {
+  credentials: { type: "bearer", token: "example-token" },
+});
+export const mappedBookmark = fromHref(root.env.staging, {
+  credentials: { "example.test": { type: "bearer", token: "example-token" } },
+});
+// @ts-expect-error Bearer credentials require a token.
+fromRoot(root, "staging", { credentials: { type: "bearer" } });
+// @ts-expect-error Credential tokens must be strings.
+fromHref(root.env.staging, { credentials: { "example.test": { type: "bearer", token: 123 } } });
+// @ts-expect-error Unsupported credential schemes are rejected.
+fromHref(root.env.staging, { credentials: { type: "basic", token: "example-token" } });
 // @ts-expect-error Environment argument is required.
 fromRoot(root);
 // @ts-expect-error Only defined environment keys are accepted.
@@ -388,8 +406,8 @@ const missingEnv: ApiRoot<Payload> = { profile: root.profile };
 // @ts-expect-error ApiRoot env values must be strings.
 const nonStringEnv: ApiRoot<Payload, { staging: number }> = { env: { staging: 123 }, profile: root.profile };
 export const entryLink: Link<{ get: [void, Payload] }> = inferred;
-export const name: string = inferred.name;
-export const title: string = inferred.title;
+export const name: string | undefined = inferred.name;
+export const title: string | undefined = inferred.title;
 export const href: string = inferred.href;
 // @ts-expect-error Link href is read-only.
 inferred.href = "https://api.example.com/other";
@@ -403,8 +421,8 @@ declare const resource: Payload;
 export const links: Link<{ get: [void, Payload] }>[] = resource.getRel<{ get: [void, Payload] }>("related");
 const bookmarked = fromHref<Payload>("https://api.example.com/resources/123");
 export const bookmarkLink: Link<{ get: [void, Payload] }> = bookmarked;
-export const bookmarkName: string = bookmarked.name;
-export const bookmarkTitle: string = bookmarked.title;
+export const bookmarkName: string | undefined = bookmarked.name;
+export const bookmarkTitle: string | undefined = bookmarked.title;
 export const bookmarkHref: string = bookmarked.href;
 export const bookmarkResult: Promise<Payload> = bookmarked.request.get();
 export async function readBookmark(): Promise<Payload> {

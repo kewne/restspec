@@ -258,5 +258,35 @@ const checklist = await bookmarkLink.request.get();
 The resource type is supplied by the caller; it does not validate the response.
 Without a resource type argument, the GET response type is `unknown`.
 
+### Credentials
+
+Both `fromRoot(root, env, options)` and `fromHref(href, options)` accept bearer
+credentials. A single token is scoped to the entrypoint's origin, including
+its scheme and port, and is reused for same-origin discovered links:
+
+```ts
+const rootLink = fromRoot(apiRoot, "production", {
+   credentials: { type: "bearer", token: accessToken },
+});
+```
+
+For APIs spanning multiple domains, supply a credentials map:
+
+```ts
+const rootLink = fromRoot(apiRoot, "production", {
+   credentials: {
+      "https://api.example.com": { type: "bearer", token: apiToken },
+      "files.example.com": { type: "bearer", token: filesToken },
+   },
+});
+```
+
+Each link selects credentials by exact origin, then host (including port), then
+hostname. URL keys are normalized to their origin. Hostname keys apply across
+schemes and ports; prefer HTTPS origin keys for narrowly scoped credentials.
+Discovered links retain the configuration but send `Authorization: Bearer ...`
+only when their destination matches. Unconfigured destinations receive no
+authorization header. No wildcard or subdomain matching is performed.
+
 These examples illustrate the client types only. `fromRoot` and `fromHref`
 are currently stubs and do not yet implement HTTP requests or resource navigation.
