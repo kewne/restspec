@@ -1,11 +1,13 @@
 profile: https://checklists.keeoon.dev/profiles/root
 schema:
-  application/json: ../schemas/json/root.json
+  application/json:
+    get:
+      response: ../schemas/json/root.json
 rels:
   related:
     - name: checklists
       description: The current user's checklists.
-      profile: https://checklists.keeoon.dev/profiles/user-checklists
+      profile: https://checklists.keeoon.dev/profiles/checklist-list
     - name: checklist-instances
       description: The current user's checklist instances.
       profile: https://checklists.keeoon.dev/profiles/user-checklist-instances
@@ -15,7 +17,7 @@ rels:
   create:
     - name: checklists
       description: Creates a checklist for the current user.
-      profile: https://checklists.keeoon.dev/profiles/checklist
+      profile: https://checklists.keeoon.dev/profiles/checklist-list
     - name: checklist-instances
       description: Creates a checklist instance for the current user.
       profile: https://checklists.keeoon.dev/profiles/checklist-instance

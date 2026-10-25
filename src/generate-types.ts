@@ -3,7 +3,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import { InputData, JSONSchemaInput, JSONSchemaStore, quicktype } from "quicktype-core";
-import { TypeScriptTypesLanguage } from "./typescript-types.js";
+import { httpMethods, type MethodSources, TypeScriptTypesLanguage } from "./typescript-types.js";
 
 type Schema = Record<string, unknown> | boolean;
 
@@ -261,10 +261,10 @@ export async function generateTypes(
   }
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointLabel);
   const profiles = new Map<string, string>();
-  const profileSchemas = new Map<string, string>();
+  const profileMethods = new Map<string, Record<string, { request?: string; response?: string }>>();
   const profileRelations = new Map<string, { relation: string; name: string; profile: string }[]>();
   const schemaLocations = new Map<string, Location>();
-  let rootSchema: string | undefined;
+  const responseSchemas = new Set<string>();
 
   for (const { location, expectedUrl } of profileEntries) {
     const label = location.label;
@@ -299,17 +299,37 @@ export async function generateTypes(
         }
       }
     }
-    if (!isMapping(profile.schema)) {
+    if (profile.schema !== undefined && !isMapping(profile.schema)) {
       throw new Error(`${label}: schema must be a media-type mapping`);
     }
-    const schema = profile.schema["application/json"];
+    const methods: Record<string, { request?: string; response?: string }> = {};
+    profileMethods.set(uri, methods);
+    const schema = profile.schema?.["application/json"];
     if (schema !== undefined) {
-      const relativePath = requiredString(schema, "schema.application/json", label);
-      const schemaLocation = await resolveSchemaLocation(relativePath, location, inputs);
-      schemaLocations.set(schemaLocation.url, schemaLocation);
-      profileSchemas.set(uri, schemaLocation.url);
-      if (uri === rootProfile) {
-        rootSchema = schemaLocation.url;
+      if (!isMapping(schema)) {
+        throw new Error(`${label}: schema.application/json must be an HTTP-method mapping`);
+      }
+      for (const [method, bodies] of Object.entries(schema)) {
+        if (!httpMethods.some((supported) => supported === method)) {
+          throw new Error(`${label}: schema.application/json.${method}: unsupported HTTP method`);
+        }
+        if (!isMapping(bodies)) {
+          throw new Error(`${label}: schema.application/json.${method} must be a body-schema mapping`);
+        }
+        const slots: { request?: string; response?: string } = {};
+        methods[method] = slots;
+        for (const [body, reference] of Object.entries(bodies)) {
+          if (body !== "request" && body !== "response") {
+            throw new Error(`${label}: schema.application/json.${method}.${body}: unknown body schema`);
+          }
+          const relativePath = requiredString(reference, `schema.application/json.${method}.${body}`, label);
+          const schemaLocation = await resolveSchemaLocation(relativePath, location, inputs);
+          schemaLocations.set(schemaLocation.url, schemaLocation);
+          slots[body] = schemaLocation.url;
+          if (body === "response") {
+            responseSchemas.add(schemaLocation.url);
+          }
+        }
       }
     }
   }
@@ -317,15 +337,13 @@ export async function generateTypes(
   if (!profiles.has(rootProfile)) {
     throw new Error(`${entrypointLabel}: rootProfile ${rootProfile} has no local profile`);
   }
-  if (schemaLocations.size === 0) {
-    throw new Error(`${entrypointLabel}: no application/json schemas found`);
-  }
 
   const store = new LocalSchemaStore();
   const schemaInput = new JSONSchemaInput(store);
   const names = new Map<string, string>();
+  const schemaNames = new Map<string, string>();
   const sourceNames = new Map<string, string>();
-  let rootSourceName: string | undefined;
+  const sourceKinds = new Map<string, "request" | "response">();
   for (const schemaLocation of schemaLocations.values()) {
     const uri = schemaLocation.url;
     const label = schemaLocation.label;
@@ -341,44 +359,62 @@ export async function generateTypes(
       throw new Error(`${label}: duplicate schema type name ${name} (also in ${names.get(name)})`);
     }
     names.set(name, label);
-    sourceNames.set(uri, name);
-    if (uri === rootSchema) {
-      rootSourceName = name;
+    schemaNames.set(uri, name);
+  }
+  for (const [uri, name] of schemaNames) {
+    const kind = responseSchemas.has(uri) ? "response" : "request";
+    let sourceName = kind === "request" ? `${name}Request` : name;
+    while (kind === "request" && (names.has(sourceName) || sourceKinds.has(sourceName))) {
+      sourceName += "Request";
     }
+    sourceNames.set(uri, sourceName);
+    sourceKinds.set(sourceName, kind);
     const resourceUri = `${uri}.restspec-resource`;
     store.resourceSchemas.set(resourceUri, {
-      title: name,
+      title: sourceName,
       type: "object",
       properties: { properties: { $ref: uri } },
       required: ["properties"],
       additionalProperties: false,
     });
-    await schemaInput.addSource({ name, uris: [resourceUri] });
+    await schemaInput.addSource({ name: sourceName, uris: [resourceUri] });
   }
 
+  if (schemaLocations.size === 0) {
+    await schemaInput.addSource({ name: "RestspecEmpty", schema: "true" });
+  }
   const inputData = new InputData();
   inputData.addInput(schemaInput);
-  const relations = new Map<string, { relation: string; name: string; sourceName: string | undefined }[]>();
+  const methodsFor = (profile: string): MethodSources => Object.fromEntries(
+    Object.entries(profileMethods.get(profile) ?? {}).map(([method, bodies]) => [method, {
+      ...(bodies.request === undefined ? {} : { request: sourceNames.get(bodies.request)! }),
+      ...(bodies.response === undefined ? {} : { response: sourceNames.get(bodies.response)! }),
+    }]),
+  );
+  const relations = new Map<string, { relation: string; name: string; methods: MethodSources }[]>();
   for (const [profile, descriptions] of profileRelations) {
-    const schema = profileSchemas.get(profile);
-    const sourceName = schema === undefined ? undefined : sourceNames.get(schema);
-    if (sourceName === undefined) {
-      continue;
-    }
-    const entries = relations.get(sourceName) ?? [];
-    relations.set(sourceName, entries);
-    for (const description of descriptions) {
-      const target = profileSchemas.get(description.profile);
-      entries.push({
-        relation: description.relation,
-        name: description.name,
-        sourceName: target === undefined ? undefined : sourceNames.get(target),
-      });
+    const responses = new Set(Object.values(methodsFor(profile)).map((bodies) => bodies.response));
+    for (const sourceName of responses) {
+      if (sourceName === undefined) continue;
+      const entries = relations.get(sourceName) ?? [];
+      relations.set(sourceName, entries);
+      for (const description of descriptions) {
+        entries.push({
+          relation: description.relation,
+          name: description.name,
+          methods: methodsFor(description.profile),
+        });
+      }
     }
   }
+  const rootMethods = methodsFor(rootProfile);
   const { lines } = await quicktype({
     inputData,
-    lang: new TypeScriptTypesLanguage({ env, profile: rootProfile, sourceName: rootSourceName }, relations),
+    lang: new TypeScriptTypesLanguage(
+      { env, profile: rootProfile, sourceName: rootMethods.get?.response, methods: rootMethods },
+      relations,
+      sourceKinds,
+    ),
     inferDateTimes: false,
   });
 

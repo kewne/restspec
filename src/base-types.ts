@@ -1,10 +1,11 @@
 
 import { parseHalResource } from "./hal.js"
 
-export type ApiRoot<RootResource, ENV extends Record<string, string> = Record<string, string>> = {
+export type ApiRoot<RootResource, ENV extends Record<string, string> = Record<string, string>, ROOT_METHODS extends Methods = { get: [void, RootResource] }> = {
     env: ENV
     profile: string
     readonly __resourceType?: RootResource
+    readonly __methodTypes?: ROOT_METHODS
 }
 
 export type Methods = {
@@ -48,7 +49,7 @@ export type Link<TYPES extends Methods = {}> = {
     title?: string
     readonly href: string
     request: {
-        [method in HttpMethod | keyof TYPES]: (reqBody: method extends keyof TYPES ? TYPES[method][0] : unknown) =>
+        [method in HttpMethod | keyof TYPES]: (reqBody: method extends keyof TYPES ? TYPES[method][0] : void) =>
             Promise<method extends keyof TYPES ? TYPES[method][1] : unknown>
     }
 }
@@ -86,8 +87,8 @@ export function createLink<RESOURCE = unknown>(
     }
 }
 
-export function fromRoot<RESOURCE, ENV extends Record<string, string>>(root: ApiRoot<RESOURCE, ENV>, env: keyof ENV & string, options?: ClientOptions): Link<{ get: [void, RESOURCE] }> {
-    return fromHref<RESOURCE>(root.env[env]!, options)
+export function fromRoot<RESOURCE, ENV extends Record<string, string>, ROOT_METHODS extends Methods = { get: [void, RESOURCE] }>(root: ApiRoot<RESOURCE, ENV, ROOT_METHODS>, env: keyof ENV & string, options?: ClientOptions): Link<ROOT_METHODS> {
+    return fromHref<RESOURCE>(root.env[env]!, options) as unknown as Link<ROOT_METHODS>
 }
 
 export function fromHref<RESOURCE = unknown>(href: string, options?: ClientOptions): Link<{ get: [void, RESOURCE] }> {

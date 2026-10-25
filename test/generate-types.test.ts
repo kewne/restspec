@@ -66,7 +66,7 @@ async function fixture(schema: Schema = basicSchema) {
   });
   await put("profiles/root.yml", {
     profile: rootProfile,
-    schema: { "application/json": "../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
     rels: {},
   });
   await put("schemas/payload.json", JSON.stringify(schema));
@@ -81,6 +81,208 @@ async function fixture(schema: Schema = basicSchema) {
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+async function compileConsumer(project: Fixture, source: string): Promise<void> {
+  const consumer = await project.put("consumer.ts", source);
+  const compiled = spawnSync(process.execPath, [
+    join(root, "node_modules/typescript/bin/tsc"),
+    "--strict", "--noEmit", "--skipLibCheck", consumer,
+  ], { encoding: "utf8" });
+  expect(compiled.error).toBeUndefined();
+  expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
+}
+
+test("infers plain request payloads and response resources for every method and root", async () => {
+  const project = await fixture();
+  const methods = Object.fromEntries(["get", "post", "put", "patch", "delete", "head", "options"].map((method) => [method, {
+    request: "../schemas/create.json", response: "../schemas/payload.json",
+  }]));
+  await project.put("schemas/create.json", JSON.stringify({
+    title: "Create", type: "object", properties: { title: { type: "string" } },
+    required: ["title"], additionalProperties: false,
+  }));
+  await project.put("profiles/root.yml", {
+    profile: rootProfile, schema: { "application/json": methods },
+    rels: { related: [{ name: "self", profile: rootProfile }, { name: "external", profile: "urn:external" }] },
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain("export type CreateRequest = {");
+  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { CreateRequest, Payload } from "./generated/types.js";
+const body: CreateRequest = { title: "new" };
+const link = fromRoot(root, "staging");
+${["get", "post", "put", "patch", "delete", "head", "options"].map((method) => `
+export const ${method}Result: Promise<Payload> = link.request.${method}(body);
+// @ts-expect-error Request schemas require a body.
+link.request.${method}();
+// @ts-expect-error Request payloads are not resource wrappers.
+link.request.${method}({ properties: body });
+// @ts-expect-error Incorrect request property types are rejected.
+link.request.${method}({ title: 123 });
+declare const resource${method}: Payload;
+export const named${method}: Promise<Payload> = resource${method}.rels.related.self.request.${method}(body);
+`).join("\n")}
+declare const resource: Payload;
+export const external: Promise<unknown> = resource.rels.related.external.request.post();
+// @ts-expect-error External targets have no request schema.
+resource.rels.related.external.request.post(body);
+`);
+});
+
+test.each([undefined, {}, { "application/json": {} }, { "application/json": { post: {}, get: {} } }])(
+  "generates schema-free profiles with void requests and unknown responses (%j)", async (schema) => {
+    const project = await fixture();
+    await project.put("profiles/root.yml", { profile: rootProfile, ...(schema === undefined ? {} : { schema }) });
+    success(project.generate());
+    const types = await readFile(project.output, "utf8");
+    expect(types).not.toContain("RestspecEmpty");
+    await compileConsumer(project, `import { fromRoot, fromHref } from "@kewne/restspec";
+import type { Link } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+const link = fromRoot(root, "staging");
+export const response: Promise<unknown> = link.request.get();
+export const post: Promise<unknown> = link.request.post();
+// @ts-expect-error Missing request schemas forbid bodies.
+link.request.post({ title: "new" });
+// @ts-expect-error Missing response schemas do not promise a concrete result.
+export const incorrect: Promise<string> = link.request.get();
+declare const untyped: Link;
+export const untypedResult: Promise<unknown> = untyped.request.post();
+// @ts-expect-error Untyped requests default to void too.
+untyped.request.post("body");
+const bookmark = fromHref("https://example.test/");
+// @ts-expect-error Unspecified bookmark methods default to void.
+bookmark.request.patch({});
+`);
+  },
+);
+
+test("parses per-method request and response schemas", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { request: "../schemas/create.json" },
+    } },
+  });
+  await project.put("schemas/create.json", JSON.stringify({ title: "Create", type: "string" }));
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain("export interface Payload");
+  expect(types).toContain("Create");
+});
+
+test("shares schemas across body roles and independently defaults missing body slots", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { request: "../schemas/payload.json" },
+      patch: { response: "../schemas/updated.json" },
+    } },
+    rels: { related: [{ name: "self", profile: rootProfile }] },
+  });
+  await project.put("schemas/updated.json", JSON.stringify({ title: "Updated", type: "boolean" }));
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
+  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { Payload, Updated } from "./generated/types.js";
+const link = fromRoot(root, "staging");
+export const post: Promise<unknown> = link.request.post({ id: "new" });
+export const patch: Promise<Updated> = link.request.patch();
+// @ts-expect-error An absent response schema cannot imply Payload.
+export const wrongResponse: Promise<Payload> = link.request.post({ id: "new" });
+// @ts-expect-error An absent request schema forbids a body.
+link.request.patch({ id: "new" });
+declare const updated: Updated;
+export const named: Promise<Payload> = updated.rels.related.self.request.get();
+// @ts-expect-error Request slots sharing a response schema still require plain payloads.
+link.request.post({ properties: { id: "new" } });
+`);
+});
+
+test("renders request-only scalar, array, recursive and unconstrained payloads with safe names", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { request: "../schemas/node.json" },
+      put: { request: "../schemas/scalar.json" },
+      patch: { request: "../schemas/array.json" },
+      delete: { request: "../schemas/any.json" },
+      options: { request: "../schemas/collision.json" },
+    } },
+  });
+  await project.put("schemas/payload.json", JSON.stringify({ ...basicSchema, title: "NodeRequest" }));
+  await project.put("schemas/node.json", JSON.stringify({
+    title: "Node", type: "object", properties: {
+      value: { type: "string" }, children: { type: "array", items: { $ref: "#" } },
+    }, required: ["value", "children"], additionalProperties: false,
+  }));
+  await project.put("schemas/scalar.json", JSON.stringify({ title: "Link", type: "string" }));
+  await project.put("schemas/array.json", JSON.stringify({ title: "Items", type: "array", items: { type: "number" } }));
+  await project.put("schemas/any.json", "true");
+  await project.put("schemas/collision.json", JSON.stringify({ title: "node-request", type: "boolean" }));
+  success(project.generate());
+  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+const link = fromRoot(root, "staging");
+link.request.post({ value: "parent", children: [{ value: "child", children: [] }] });
+link.request.put("label");
+link.request.patch([1, 2]);
+link.request.delete({ arbitrary: true });
+link.request.options(true);
+export async function readRoot(): Promise<string> {
+  const resource = await link.request.get();
+  return resource.properties.id;
+}
+// @ts-expect-error Recursive payload fields preserve their types.
+link.request.post({ value: "parent", children: [{ value: 123, children: [] }] });
+// @ts-expect-error Scalar request types are enforced.
+link.request.put(123);
+// @ts-expect-error Array request element types are enforced.
+link.request.patch(["wrong"]);
+`);
+});
+
+test("unions duplicate named link targets independently for each method", async () => {
+  const project = await fixture();
+  const child = "urn:child";
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
+    rels: { related: [{ name: "target", profile: rootProfile }, { name: "target", profile: child }] },
+  });
+  await project.put("profiles/child.yml", {
+    profile: child,
+    schema: { "application/json": {
+      get: { response: "../schemas/child.json" },
+      post: { request: "../schemas/child.json", response: "../schemas/child.json" },
+    } },
+  });
+  await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
+  success(project.generate());
+  await compileConsumer(project, `import type { Payload, Child } from "./generated/types.js";
+declare const resource: Payload;
+const target = resource.rels.related.target;
+export const response: Promise<Payload | Child> = target.request.get();
+export const body: Promise<unknown> = target.request.post("new");
+export const absentBody: Promise<unknown> = target.request.post();
+// @ts-expect-error Either target can be returned.
+export const wrong: Promise<Payload> = target.request.get();
+// @ts-expect-error One target has no POST response schema.
+export const wrongPost: Promise<Child> = target.request.post("new");
+// @ts-expect-error Neither target accepts a numeric POST body.
+target.request.post(123);
+`);
+});
 
 test("resource wrapper nests payload properties without wrapping nested objects", async () => {
   const project = await fixture({
@@ -98,7 +300,7 @@ test("resource wrapper nests payload properties without wrapping nested objects"
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface Payload \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
   expect(types.match(/export interface /g)).toHaveLength(1);
-  expect(types).toContain("getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];");
+  expect(types).toContain("getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];");
   expect(types).toContain("get rels(): {");
 });
 
@@ -134,7 +336,7 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   const childProfile = "https://example.test/profiles/child";
   await project.put("profiles/root.yml", {
     profile: rootProfile,
-    schema: { "application/json": "../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
     rels: {
       related: [{ name: "child", profile: childProfile }, { name: "external", profile: "urn:external" }],
       create: [{ name: "child", profile: childProfile }],
@@ -145,13 +347,13 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   });
   await project.put("profiles/child.yml", {
     profile: childProfile,
-    schema: { "application/json": "../schemas/child.json" },
+    schema: { "application/json": { get: { response: "../schemas/child.json" } } },
     rels: { related: [{ name: "parent", profile: rootProfile }] },
   });
   await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types.match(/getRel<METHODS extends Methods>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
+  expect(types.match(/getRel<METHODS extends Methods = {}>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
   expect(types).toContain("get rels(): {");
   const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "@kewne/restspec";
 import type { Payload, Child } from "./generated/types.js";
@@ -161,7 +363,7 @@ export const namedChild: Promise<Child> = resource.rels.related.child.request.ge
 export const namedParent: Promise<Payload> = ({} as Child).rels.related.parent.request.get();
 export const namedExternal: Promise<unknown> = resource.rels.related.external.request.get();
 export const namedCustom: Promise<Payload> = resource.rels["urn:custom"].self.request.get();
-export const namedCreate = resource.rels["create-from"].child.request.post({ label: "child" });
+export const namedCreate: Promise<unknown> = resource.rels["create-from"].child.request.post();
 // @ts-expect-error Unknown link names are not exposed.
 resource.rels.related.missing;
 // @ts-expect-error Unknown relations are not exposed.
@@ -179,15 +381,15 @@ export const title: string | undefined = links[0].title;
 export const created: Promise<Child> = links[0].request.post({ label: "child" });
 export const parent: Promise<Payload> = ({} as Child).getRel<{ get: [void, Payload] }>("related")[0].request.get();
 export const custom: Link<Methods>[] = resource.getRel<Methods>("urn:custom");
-export const unspecified: Link<Methods>[] = resource.getRel("not-in-the-spec");
+export const unspecified: Link[] = resource.getRel("not-in-the-spec");
 declare const defaults: Link;
-export const defaultGet: Promise<unknown> = defaults.request.get({});
-export const defaultPost: Promise<unknown> = defaults.request.post("body");
-export const defaultPut: Promise<unknown> = links[0].request.put({});
-export const defaultPatch: Promise<unknown> = defaults.request.patch(null);
+export const defaultGet: Promise<unknown> = defaults.request.get();
+export const defaultPost: Promise<unknown> = defaults.request.post();
+export const defaultPut: Promise<unknown> = links[0].request.put();
+export const defaultPatch: Promise<unknown> = defaults.request.patch();
 export const defaultDelete: Promise<unknown> = defaults.request.delete(undefined);
 export const defaultHead: Promise<unknown> = unspecified[0].request.head(undefined);
-export const defaultOptions: Promise<unknown> = defaults.request.options({});
+export const defaultOptions: Promise<unknown> = defaults.request.options();
 declare const customMethod: Link<{ search: [{ query: string }, Child] }>;
 export const searched: Promise<Child> = customMethod.request.search({ query: "child" });
 `);
@@ -207,8 +409,8 @@ declare const link: Link<{ get: [void, string] }>;
 link.get();
 link.request.get("invalid body");
 declare const defaults: Link;
-const wrongDefault: Promise<string> = defaults.request.get({});
-const wrongInferredDefault: Promise<string> = resource.getRel("related")[0].request.post({});
+const wrongDefault: Promise<string> = defaults.request.get();
+const wrongInferredDefault: Promise<string> = resource.getRel("related")[0].request.post();
 const wrongBody: string = {} as Parameters<typeof defaults.request.post>[0];
 resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.post({ label: 123 });
 `);
@@ -223,7 +425,7 @@ resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.pos
   expect(invalid.stdout).toContain("Property 'get' does not exist");
   expect(invalid.stdout).toContain("Argument of type 'string' is not assignable to parameter of type 'void'");
   expect(invalid.stdout).toContain("Type 'Promise<unknown>' is not assignable to type 'Promise<string>'");
-  expect(invalid.stdout).toContain("Type 'unknown' is not assignable to type 'string'");
+  expect(invalid.stdout).toContain("Type 'void | undefined' is not assignable to type 'string'");
   expect(invalid.stdout).toContain("Type 'number' is not assignable to type 'string'");
 });
 
@@ -233,7 +435,7 @@ test("root export uses the generated root schema type name", async () => {
   const types = await readFile(project.output, "utf8");
   expect(types).toContain('import type { ApiRoot, Link, Methods } from "@kewne/restspec";');
   expect(types).toContain("export interface RootPayload");
-  expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; }> = {");
+  expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; },");
   expect(types).toContain(`    env: {
         /**
          * Staging environment.
@@ -252,28 +454,28 @@ test.each([
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types).toContain(`export interface ${name} {`);
-  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; }> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; },`);
 });
 
 test("root export follows its profile rather than discovery order and shares schema types", async () => {
   const project = await fixture();
   await project.put("profiles/aaa.yml", {
     profile: "https://example.test/profiles/first",
-    schema: { "application/json": "../schemas/first.json" },
+    schema: { "application/json": { get: { response: "../schemas/first.json" } } },
   });
   await project.put("schemas/first.json", JSON.stringify({ title: "First", type: "boolean" }));
   await project.put("profiles/alias.yml", {
     profile: "https://example.test/profiles/alias",
-    schema: { "application/json": "../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
     rels: { related: [{ name: "root", profile: rootProfile }] },
   });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface First \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
-  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
-  expect(types.match(/getRel<METHODS extends Methods>/g)).toHaveLength(2);
-  expect(types).toContain('get "root"(): Link<{ get: [void, Payload] }>;');
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; },");
+  expect(types.match(/getRel<METHODS extends Methods = {}>/g)).toHaveLength(2);
+  expect(types).toContain('get "root"(): Link<{ get: [void, Payload];');
 });
 
 test("root export falls back to unknown without a root JSON schema", async () => {
@@ -281,17 +483,17 @@ test("root export falls back to unknown without a root JSON schema", async () =>
   await project.put("profiles/root.yml", { profile: rootProfile, schema: {} });
   await project.put("profiles/other.yml", {
     profile: "https://example.test/profiles/other",
-    schema: { "application/json": "../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
   });
   success(project.generate());
-  expect(await readFile(project.output, "utf8")).toContain("export const root: ApiRoot<unknown, { staging: string; production: string; }> = {");
+  expect(await readFile(project.output, "utf8")).toContain("export const root: ApiRoot<unknown, { staging: string; production: string; },");
 });
 
 test("root export uses deconflicted schema identifiers", async () => {
   const project = await fixture({ ...basicSchema, title: "Root payload" });
   await project.put("profiles/other.yml", {
     profile: "https://example.test/profiles/other",
-    schema: { "application/json": "../schemas/other.json" },
+    schema: { "application/json": { get: { response: "../schemas/other.json" } } },
   });
   await project.put("schemas/other.json", JSON.stringify({
     title: "root-payload", type: "object", properties: { count: { type: "number" } }, required: ["count"],
@@ -300,7 +502,7 @@ test("root export uses deconflicted schema identifiers", async () => {
   const types = await readFile(project.output, "utf8");
   const name = types.match(/export interface (\w+) \{\s+properties: \{\s+id:/)?.[1];
   expect(name).toBeDefined();
-  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; }> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; },`);
 });
 
 test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s type name and preserves escaped values", async (title) => {
@@ -318,7 +520,7 @@ test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s typ
     rootProfile: profile,
   });
   await project.put("profiles/root.yml", {
-    profile, schema: { "application/json": "../schemas/payload.json" },
+    profile, schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
   });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
@@ -328,7 +530,7 @@ test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s typ
   expect(name).not.toBe("ENV");
   expect(name).not.toBe("Link");
   expect(name).not.toBe("Methods");
-  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; ${JSON.stringify("prod-env\"\\\n")}: string; }> = {`);
+  expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; ${JSON.stringify("prod-env\"\\\n")}: string; },`);
   expect(types).toContain(`        /**
          * Staging * / "\\
          * Second line
@@ -496,11 +698,18 @@ export const related = resource.getRel<{ get: [void, Subscription] }>("related")
 export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
 export async function typeSafeAccess() {
   const resource = await fromRoot(root, "local").request.get();
-  await resource.rels.related.checklists.request.post({ title: "My New Checklist" });
+  const created: Checklist = await resource.rels.create.checklists.request.post({ title: "My New Checklist" });
+  // @ts-expect-error Checklist creation requires a title.
+  resource.rels.create.checklists.request.post({});
+  // @ts-expect-error Checklist titles must be strings.
+  resource.rels.create.checklists.request.post({ title: 123 });
+  // @ts-expect-error Checklist creation requires a request body.
+  resource.rels.create.checklists.request.post();
+  // @ts-expect-error The list profile only defines POST, not a GET response.
+  const invalidGet: Promise<Checklist> = resource.rels.create.checklists.request.get();
   const subscription: Subscription = await resource.rels.related.subscription.request.get();
-  const checklist: Checklist = await resource.rels.create.checklists.request.get();
-  const instance: ChecklistInstance = await checklist.rels["create-from"].instance.request.get();
-  return { subscription, instance };
+  const instance: ChecklistInstance = await created.rels["create-from"].instance.request.get();
+  return { created, subscription, instance };
 }
 `);
   const compiled = spawnSync(process.execPath, [
@@ -515,11 +724,11 @@ test("discovers nested YAML profiles, includes unreachable profiles and deduplic
   const project = await fixture();
   await project.put("profiles/nested/unreachable.yaml", {
     profile: "https://example.test/profiles/unreachable",
-    schema: { "application/json": "../../schemas/other.json" },
+    schema: { "application/json": { get: { response: "../../schemas/other.json" } } },
   });
   await project.put("profiles/alias.yml", {
     profile: "https://example.test/profiles/alias",
-    schema: { "application/json": "../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
   });
   await project.put("profiles/xml.yml", {
     profile: "https://example.test/profiles/xml",
@@ -589,13 +798,17 @@ test.each<[label: string, change: (project: Fixture) => Promise<unknown>, expect
   ["missing profiles directory", (project) => rm(join(project.directory, "profiles"), { recursive: true }), /ENOENT.*profiles/],
   ["duplicate profile URI", (project) => project.put("profiles/duplicate.yml", { profile: rootProfile, schema: {} }), /duplicate profile URI/],
   ["invalid schema mapping", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: [] }), /schema must be a media-type mapping/],
-  ["invalid schema path", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": 3 } }), /schema.application\/json must be a nonempty string/],
+  ["invalid method mapping", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": 3 } }), /schema.application\/json must be an HTTP-method mapping/],
+  ["legacy schema path", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": "../schemas/payload.json" } }), /schema.application\/json must be an HTTP-method mapping/],
+  ["unsupported method", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": { trace: {} } } }), /unsupported HTTP method/],
+  ["invalid method bodies", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": { get: [] } } }), /schema.application\/json.get must be a body-schema mapping/],
+  ["invalid body schema", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": { post: { request: null } } } }), /schema.application\/json.post.request must be a nonempty string/],
+  ["unknown body schema", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: { "application/json": { get: { result: "schema.json" } } } }), /unknown body schema/],
   ["invalid relations", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: [] }), /rels must be a relation-type mapping/],
   ["invalid relation array", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: {} } }), /rels.related must be an array/],
   ["invalid relation entry", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: ["invalid"] } }), /rels.related entries must be mappings/],
   ["missing relation target", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{}] } }), /rels.related.profile must be a nonempty string/],
   ["invalid relation name", (project) => project.put("profiles/root.yml", { profile: rootProfile, rels: { related: [{ name: 123, profile: rootProfile }] } }), /rels.related.name must be a nonempty string/],
-  ["no JSON schemas", (project) => project.put("profiles/root.yml", { profile: rootProfile, schema: {} }), /no application\/json schemas found/],
   ["http schema reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "http://example.invalid/schema.json" })), /Only file: and https: schema references are supported/],
   ["unreachable https schema reference", (project) => project.put("schemas/payload.json", JSON.stringify({ $ref: "https://127.0.0.1:1/schema.json" })), /Could not fetch schema https:\/\/127\.0\.0\.1:1\/schema\.json/],
 ])("reports %s without replacing existing output", async (_label, change, expected) => {
@@ -614,7 +827,7 @@ test("rejects duplicate top-level names instead of silently losing a schema", as
   const project = await fixture();
   await project.put("profiles/other.yml", {
     profile: "https://example.test/profiles/other",
-    schema: { "application/json": "../schemas/other.json" },
+    schema: { "application/json": { get: { response: "../schemas/other.json" } } },
   });
   await project.put("schemas/other.json", JSON.stringify(basicSchema));
   const result = project.generate();
@@ -622,8 +835,12 @@ test("rejects duplicate top-level names instead of silently losing a schema", as
   expect(result.stderr).toMatch(/duplicate schema type name Payload/);
 });
 
-test("protects input schemas reached through output symlinks", async () => {
+test.each(["request", "response"])("protects %s schemas reached through output symlinks", async (body) => {
   const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { post: { [body]: "../schemas/payload.json" } } },
+  });
   const schema = join(project.directory, "schemas/payload.json");
   const original = await readFile(schema, "utf8");
   const output = join(project.directory, "linked.ts");
@@ -638,12 +855,12 @@ test("retains distinct top-level names and filename fallbacks across schemas", a
   const project = await fixture();
   await project.put("profiles/other.yml", {
     profile: "https://example.test/profiles/other",
-    schema: { "application/json": "../schemas/other.json" },
+    schema: { "application/json": { get: { response: "../schemas/other.json" } } },
   });
   await project.put("schemas/other.json", JSON.stringify({ ...basicSchema, title: "Other" }));
   await project.put("profiles/fallback.yml", {
     profile: "https://example.test/profiles/fallback",
-    schema: { "application/json": "../schemas/fallback.schema.json" },
+    schema: { "application/json": { get: { response: "../schemas/fallback.schema.json" } } },
   });
   await project.put("schemas/fallback.schema.json", JSON.stringify({ type: "string" }));
   success(project.generate());
@@ -677,7 +894,7 @@ test.each(["--profiles", "-p"])("reads profiles from a custom directory with %s"
   await rm(join(project.directory, "profiles"), { recursive: true });
   await project.put("custom-profiles/nested/root.yml", {
     profile: rootProfile,
-    schema: { "application/json": "../../schemas/payload.json" },
+    schema: { "application/json": { get: { response: "../../schemas/payload.json" } } },
     rels: {},
   });
   const relativeResult = invoke(
@@ -687,7 +904,7 @@ test.each(["--profiles", "-p"])("reads profiles from a custom directory with %s"
   success(relativeResult);
   const types = await readFile(project.output, "utf8");
   expect(types).toContain("export interface Payload");
-  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; },");
 
   const absoluteOutput = join(project.directory, "generated/absolute-types.ts");
   const absoluteResult = invoke([
@@ -782,13 +999,13 @@ test.each(["--config", "-c"])("generates types from a config file with %s using 
   const project = await fixture();
   await project.put("profiles/ignored.yml", {
     profile: "https://example.test/profiles/ignored",
-    schema: { "application/json": "../schemas/ignored.json" },
+    schema: { "application/json": { get: { response: "../schemas/ignored.json" } } },
   });
   await project.put("schemas/ignored.json", JSON.stringify({ title: "Ignored", type: "boolean" }));
   const fileUrlProfile = pathToFileURL(join(project.directory, "profiles/file-url.yml")).href;
   await project.put("profiles/file-url.yml", {
     profile: fileUrlProfile,
-    schema: { "application/json": "../schemas/extra.json" },
+    schema: { "application/json": { get: { response: "../schemas/extra.json" } } },
   });
   await project.put("schemas/extra.json", JSON.stringify({ title: "Extra", type: "number" }));
 
@@ -809,7 +1026,7 @@ test.each(["--config", "-c"])("generates types from a config file with %s using 
   expect(types).toContain("export interface Payload");
   expect(types).toContain("export interface Extra");
   expect(types).not.toContain("Ignored");
-  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; }> = {");
+  expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; },");
 });
 
 test("dereferences https: URLs for entrypoint, profiles, and schemas in config", async () => {
@@ -822,14 +1039,17 @@ test("dereferences https: URLs for entrypoint, profiles, and schemas in config",
     }),
     "/profiles/root": stringify({
       profile: `${origin}/profiles/root`,
-      schema: { "application/json": "../schemas/root.json" },
+      schema: { "application/json": {
+        get: { response: "../schemas/root.json" },
+        post: { request: "../schemas/create.json" },
+      } },
       rels: {
         related: [{ name: "mapped", profile: mappedProfileUrl }],
       },
     }),
     "/profiles/mapped.yml": stringify({
       profile: mappedProfileUrl,
-      schema: { "application/json": "../schemas/mapped.json" },
+      schema: { "application/json": { get: { response: "../schemas/mapped.json" } } },
     }),
     "/schemas/root.json": JSON.stringify({
       title: "RemoteRoot",
@@ -844,6 +1064,7 @@ test("dereferences https: URLs for entrypoint, profiles, and schemas in config",
       required: ["value"],
       additionalProperties: false,
     }),
+    "/schemas/create.json": JSON.stringify({ title: "RemoteCreate", $ref: "./child.json" }),
     "/schemas/mapped.json": JSON.stringify({
       title: "MappedResource",
       type: "boolean",
@@ -867,8 +1088,15 @@ test("dereferences https: URLs for entrypoint, profiles, and schemas in config",
   const types = await readFile(project.output, "utf8");
   expect(types).toContain("export interface RemoteRoot");
   expect(types).toContain("export interface MappedResource");
-  expect(types).toMatch(/get "mapped"\(\): Link<\{ get: \[void, MappedResource\] \}>;/);
-  expect(types).toContain("export const root: ApiRoot<RemoteRoot, { production: string; }> = {");
+  expect(types).toContain('get "mapped"(): Link<{ get: [void, MappedResource];');
+  expect(types).toContain("export const root: ApiRoot<RemoteRoot, { production: string; },");
+  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+const link = fromRoot(root, "production");
+export const created: Promise<unknown> = link.request.post({ value: "new" });
+// @ts-expect-error Remote request schema references preserve payload types.
+link.request.post({ value: 123 });
+`);
 });
 
 test("protects config file from being overwritten by output", async () => {

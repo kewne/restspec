@@ -1,0 +1,7 @@
+profile: https://checklists.keeoon.dev/profiles/checklist-list
+schema:
+  application/json:
+    post:
+      request: ../schemas/json/create-checklist.json
+      response: ../schemas/json/checklist.json
+rels: {}

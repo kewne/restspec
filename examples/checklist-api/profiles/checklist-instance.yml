@@ -1,6 +1,8 @@
 profile: https://checklists.keeoon.dev/profiles/checklist-instance
 schema:
-  application/json: ../schemas/json/checklist-instance.json
+  application/json:
+    get:
+      response: ../schemas/json/checklist-instance.json
 rels:
   related:
     - name: checklist

@@ -13,16 +13,21 @@ import {
   UnionType,
 } from "quicktype-core";
 
+export const httpMethods = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
+
+export type MethodSources = Readonly<Record<string, { request?: string; response?: string }>>;
+
 type RootMetadata = {
   env: Readonly<Record<string, { readonly url: string; readonly description?: string }>>;
   profile: string;
   sourceName: string | undefined;
+  methods: MethodSources;
 };
 
 type Relations = ReadonlyMap<string, readonly {
   relation: string;
   name: string;
-  sourceName: string | undefined;
+  methods: MethodSources;
 }[]>;
 
 class ExportedTypesRenderer extends TypeScriptRenderer {
@@ -36,6 +41,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
     options: ConstructorParameters<typeof TypeScriptRenderer>[2],
     private readonly root: RootMetadata,
     private readonly relations: Relations,
+    private readonly sourceKinds: ReadonlyMap<string, "request" | "response">,
   ) {
     super(language, renderContext, options);
   }
@@ -105,30 +111,30 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       super.emitClassBlock(type, name);
       return;
     }
+    if (this.sourceKinds.get(source) === "request") {
+      this.emitLine("export type ", name, " = ", this.sourceFor(type.getProperties().get("properties")!.type).source, ";");
+      return;
+    }
     this.emitLine("export interface ", name, " {");
     this.indent(() => {
       const properties = type.getProperties().get("properties")!;
       this.emitLine("properties: ", this.sourceFor(properties.type).source, ";");
-      this.emitLine("getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];");
+      this.emitLine("getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];");
       this.emitLine("get rels(): {");
       this.indent(() => {
-        const groups = new Map<string, Map<string, Set<string | undefined>>>();
+        const groups = new Map<string, Map<string, MethodSources[]>>();
         for (const entry of this.relations.get(source) ?? []) {
-          const names = groups.get(entry.relation) ?? new Map<string, Set<string | undefined>>();
+          const names = groups.get(entry.relation) ?? new Map<string, MethodSources[]>();
           groups.set(entry.relation, names);
-          const targets = names.get(entry.name) ?? new Set<string | undefined>();
+          const targets = names.get(entry.name) ?? [];
           names.set(entry.name, targets);
-          targets.add(entry.sourceName);
+          targets.push(entry.methods);
         }
         for (const [relation, names] of groups) {
           this.emitLine("get ", JSON.stringify(relation), "(): {");
           this.indent(() => {
             for (const [linkName, targets] of names) {
-              const responses: Sourcelike[] = [...targets].map((target, index) => {
-                const type = target === undefined ? undefined : this.topLevels.get(target);
-                return [index > 0 ? " | " : "", type === undefined ? "unknown" : this.nameForNamedType(type)];
-              });
-              this.emitLine("get ", JSON.stringify(linkName), "(): Link<{ get: [void, ", responses, "] }>;");
+              this.emitLine("get ", JSON.stringify(linkName), "(): Link<", this.methodsSource(targets), ">;");
             }
           });
           this.emitLine("};");
@@ -137,6 +143,26 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       this.emitLine("};");
     });
     this.emitLine("}");
+  }
+
+  private methodsSource(targets: readonly MethodSources[]): Sourcelike {
+    const bodySource = (method: string, body: "request" | "response"): Sourcelike => {
+      const sources = new Set(targets.map((target) => target[method]?.[body]));
+      if (body === "response" && sources.has(undefined)) return "unknown";
+      return [...sources].map((source, index) => {
+        const type = source === undefined ? undefined : this.topLevels.get(source);
+        return [
+          index > 0 ? " | " : "",
+          type === undefined ? (body === "request" ? "void" : "unknown") : [
+            this.nameForNamedType(type),
+            body === "request" && this.sourceKinds.get(source!) === "response" ? '["properties"]' : "",
+          ],
+        ];
+      });
+    };
+    return ["{ ", ...httpMethods.map((method, index) => [
+      index > 0 ? "; " : "", method, ": [", bodySource(method, "request"), ", ", bodySource(method, "response"), "]",
+    ]), " }"];
   }
 
   protected override emitTypes(): void {
@@ -153,7 +179,8 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
     this.forEachNamedType(
       "leading-and-interposing",
       (type, name) => {
-        if ([...this.topLevels.values()].includes(type)) {
+        const sources = [...this.topLevels].filter(([, topLevel]) => topLevel === type).map(([source]) => source);
+        if (sources.some((source) => this.sourceKinds.has(source))) {
           this.emitDescription(this.descriptionForType(type));
           this.emitClassBlock(type, name);
         } else if (this.recursiveTypes.has(type)) {
@@ -179,7 +206,9 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       this.rootName ?? "unknown",
       ", { ",
       envType,
-      " }> = {",
+      " }, ",
+      this.methodsSource([this.root.methods]),
+      "> = {",
     );
     this.indent(() => {
       this.emitLine("env: {");
@@ -206,7 +235,11 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
 }
 
 export class TypeScriptTypesLanguage extends TypeScriptTargetLanguage {
-  constructor(private readonly root: RootMetadata, private readonly relations: Relations = new Map()) {
+  constructor(
+    private readonly root: RootMetadata,
+    private readonly relations: Relations = new Map(),
+    private readonly sourceKinds: ReadonlyMap<string, "request" | "response"> = new Map(),
+  ) {
     super();
   }
 
@@ -221,6 +254,7 @@ export class TypeScriptTypesLanguage extends TypeScriptTargetLanguage {
       }),
       this.root,
       this.relations,
+      this.sourceKinds,
     );
   }
 }

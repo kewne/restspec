@@ -59,11 +59,34 @@ Profile files describe the API's entities and the links available from them.
 Each YAML profile contains:
 
 - `profile`: a URI identifying the entity's profile, not a fixed API endpoint.
-- `schema`: a mapping from payload media types, such as `application/json`, to
-   schema file paths resolved relative to the profile file.
+- `schema`: an optional mapping from payload media types, such as
+   `application/json`, to HTTP methods. Each method can specify a `request`
+   schema, a `response` schema, or both. Schema paths are resolved relative to
+   the profile file; `file:` and `https:` URLs are also supported.
 - `rels`: link descriptions grouped by relation type. Each description includes
    a `name`, a human-readable `description`, and the target entity's `profile` URI.
    A profile with no outgoing relations uses an empty mapping.
+
+```yaml
+profile: https://example.com/profiles/checklist
+schema:
+   application/json:
+      get:
+         response: ../schemas/checklist.json
+      post:
+         request: ../schemas/create-checklist.json
+         response: ../schemas/checklist.json
+      patch:
+         request: ../schemas/update-checklist.json
+rels: {}
+```
+
+Supported method keys are `get`, `post`, `put`, `patch`, `delete`, `head`, and
+`options`. A missing request schema means `void`: callers omit the body. A
+missing response schema means `unknown`, not `void`, even for methods commonly
+used without a response body. Methods and the entire `schema` mapping may be
+omitted. The former `schema.application/json: path` shorthand is not supported.
+Type generation currently consumes only `application/json` schemas.
 
 Relation types describe protocols for how clients can interact with linked
 entities. The simplest relation type is `related`: it identifies an entity that
@@ -135,8 +158,12 @@ of exported TypeScript interfaces and type aliases, without runtime converters
 or validators. Date and date-time fields remain strings, and string enums use
 union types. Empty-object, array, and primitive payloads also have named exports.
 
-Schema payloads are inlined in each resource's `properties`, including nested
-objects and array items. Named payload types are retained only where recursive
+Response payloads are inlined in each resource's `properties`, including nested
+objects and array items. Request schemas describe plain payloads without the
+`properties`, `getRel`, or `rels` resource wrapper. Request-only schemas produce
+type aliases with a `Request` suffix; a schema shared with a response uses the
+response resource's `properties` type for requests. Names are deconflicted when
+necessary. Nested named payload types are retained only where recursive
 references require them.
 
 Top-level names come from the schema's nonempty `title`, or its filename without
@@ -177,10 +204,18 @@ import type { ApiRoot, Link, Methods } from "restspec";
 
 export interface Root {
    properties: { [key: string]: unknown };
-   getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];
+   getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];
 }
 
-export const root: ApiRoot<Root, { local: string; staging: string; production: string; }> = {
+export const root: ApiRoot<Root, { local: string; staging: string; production: string; }, {
+   get: [void, Root];
+   post: [void, unknown];
+   put: [void, unknown];
+   patch: [void, unknown];
+   delete: [void, unknown];
+   head: [void, unknown];
+   options: [void, unknown];
+}> = {
    env: {
       /**
        * Local development environment.
@@ -201,6 +236,14 @@ export const root: ApiRoot<Root, { local: string; staging: string; production: s
 
 `root.env` maps each environment name from `restspec.yml` to its entrypoint URL,
 and `fromRoot` accepts `root` along with one of its defined environment keys.
+The third `ApiRoot` type parameter preserves all root-profile method tuples in
+the returned link. Existing `ApiRoot<Resource, ENV>` declarations still default
+to a GET response of `Resource`.
+
+**Runtime limitation:** links currently execute only GET requests without request
+bodies. Method-specific schemas and explicit tuples provide TypeScript contracts;
+they do not implement POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or GET request-body
+serialization. The body-bearing calls below illustrate type contracts only.
 
 Client usage with an explicitly typed relation:
 
@@ -225,7 +268,9 @@ if (createLink) {
 `getRel` returns an array of links with `name`, `title`, a readonly `href` string,
 and `request` properties.
 Concrete method tuples specify request bodies and response resources; other
-common HTTP methods accept `unknown` and return `Promise<unknown>`.
+common HTTP methods accept `void` and return `Promise<unknown>`. Untyped links,
+external targets, and `getRel` calls without explicit tuples use those same
+defaults. Custom methods remain available through explicit `getRel` tuples.
 
 Resources also expose a read-only `rels` getter, grouped by relation type and
 known link name:
@@ -233,14 +278,15 @@ known link name:
 ```ts
 const root = await fromRoot(apiRoot, "local").request.get();
 const subscription = await root.rels.related.subscription.request.get();
-await root.rels.related.checklists.request.post({ title: "My new checklist" });
 ```
 
-Named links infer their GET response resource from the target profile's local
-JSON schema. External targets and targets without a JSON schema return `unknown`.
-Other HTTP methods retain the default `unknown` bodies and responses; use
-`getRel` with explicit method tuples when those types are needed. Relation types
-and names containing punctuation use bracket access, such as
+Named links infer each method's request payload and response resource from the
+target profile's JSON schemas. The checklist example declares GET response
+schemas and a checklist POST request with a required string `title`. Its
+`root.rels.create.checklists.request.post({ title: "New checklist" })` contract
+infers a checklist response resource. Use explicit `getRel` tuples for
+caller-known contracts absent from the specification. Relation types and names
+containing punctuation use bracket access, such as
 `checklist.rels["create-from"].instance`. Descriptions without a name are available
 only through `getRel`.
 

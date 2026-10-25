@@ -44,7 +44,7 @@ export function parseHalResource<RESOURCE>(body: unknown, createLink: LinkFactor
     if (!isRecord(body)) {
         return {
             properties: body,
-            getRel: <METHODS extends Methods>(): Link<METHODS>[] => [],
+            getRel: <METHODS extends Methods = {}>(): Link<METHODS>[] => [],
             get rels() {
                 return {};
             },
@@ -71,7 +71,7 @@ export function parseHalResource<RESOURCE>(body: unknown, createLink: LinkFactor
 
     return {
         properties,
-        getRel<METHODS extends Methods>(rel: string): Link<METHODS>[] {
+        getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[] {
             return (linksByRel.get(rel) ?? []) as unknown as Link<METHODS>[];
         },
         get rels() {
