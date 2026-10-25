@@ -111,23 +111,23 @@ component to focus on a different part of the API contract.
 
 ## TypeScript Type Generation
 
-Requires Node.js 22 or newer and npm. From this repository:
+Requires Node.js 22 or newer and npm. Install the library in your project:
 
 ```sh
-npm install
-npm run build
-node dist/cli.js generate-types examples/checklist-api/restspec.yml --profiles examples/checklist-api/profiles --out generated/types.ts
+npm install @kewne/restspec
 ```
 
-The npm package exposes the `restspec` command. To install this local package
-globally after building it:
+With your entrypoint specification in `restspec.yml` and your profile files in
+`profiles/`, generate a TypeScript module:
 
 ```sh
-npm install --global .
-restspec generate-types examples/checklist-api/restspec.yml --profiles examples/checklist-api/profiles --out generated/types.ts
+npx restspec generate-types restspec.yml --profiles profiles --out generated/types.ts
 ```
 
-Use `restspec --help` for usage or `restspec --version` for the package version.
+Import the generated module from your application, as shown below. Regenerate
+it whenever you change your specification, profiles, or schemas.
+
+Use `npx restspec --help` for usage or `npx restspec --version` for the package version.
 `generate-types` accepts either:
 
 - the entrypoint specification file as its positional argument and an optional
@@ -151,56 +151,12 @@ profiles:
     location: ./profiles/checklist.yml
 ```
 
-### Generated Types
-
-[Quicktype](https://github.com/glideapps/quicktype) generates one combined module
-of exported TypeScript interfaces and type aliases, without runtime converters
-or validators. Date and date-time fields remain strings, and string enums use
-union types. Empty-object, array, and primitive payloads also have named exports.
-
-Response payloads are inlined in each resource's `properties`, including nested
-objects and array items. Request schemas describe plain payloads without the
-`properties`, `getRel`, or `rels` resource wrapper. Request-only schemas produce
-type aliases with a `Request` suffix; a schema shared with a response uses the
-response resource's `properties` type for requests. Names are deconflicted when
-necessary. Nested named payload types are retained only where recursive
-references require them.
-
-Top-level names come from the schema's nonempty `title`, or its filename without
-`.json` when no title is present. Quicktype converts these into TypeScript
-identifiers: `Checklist instance` becomes `ChecklistInstance`, for example.
-Duplicate titles or fallback names are rejected rather than silently dropping
-a schema.
-
-```ts
-import { root } from "./generated/types.js";
-import type { Checklist, ChecklistInstance, Root, Subscription } from "./generated/types.js";
-```
-
-Generated types are not a substitute for JSON Schema validation. Quicktype may
-approximate constraints, including exclusive `oneOf`, `not`, and some JSON Schema
-2020-12 keywords. In the checklist example, `Subscription.properties` has a status union
-and an optional `endDate`; its generated type does not enforce that `ACTIVE`
-requires an end date and `INACTIVE` forbids one. The source schemas are not
-modified during generation.
-
-### Development
-
-```sh
-npm test
-npm pack
-```
-
-Tests exercise the CLI and compile generated types with strict TypeScript
-checks. Packing builds the CLI and includes its compiled files and this README;
-it does not publish the package.
-
 ## Generated Client
 
 The checklist example's generated module includes:
 
 ```ts
-import type { ApiRoot, Link, Methods } from "restspec";
+import type { ApiRoot, Link, Methods } from "@kewne/restspec";
 
 export interface Root {
    properties: { [key: string]: unknown };
@@ -248,7 +204,7 @@ serialization. The body-bearing calls below illustrate type contracts only.
 Client usage with an explicitly typed relation:
 
 ```ts
-import { fromRoot } from "restspec";
+import { fromRoot } from "@kewne/restspec";
 import { root as apiRoot } from "./generated/types.js";
 import type { Checklist } from "./generated/types.js";
 
@@ -294,7 +250,7 @@ To enter the API through an existing resource URL instead of its root, use
 `fromHref` with the expected resource type:
 
 ```ts
-import { fromHref } from "restspec";
+import { fromHref } from "@kewne/restspec";
 import type { Checklist } from "./generated/types.js";
 
 const bookmarkLink = fromHref<Checklist>("https://api.example.com/checklists/123");
@@ -334,5 +290,6 @@ Discovered links retain the configuration but send `Authorization: Bearer ...`
 only when their destination matches. Unconfigured destinations receive no
 authorization header. No wildcard or subdomain matching is performed.
 
-These examples illustrate the client types only. `fromRoot` and `fromHref`
-are currently stubs and do not yet implement HTTP requests or resource navigation.
+## Development
+
+For contributing to restspec itself, see [DEVELOPING.md](DEVELOPING.md).
