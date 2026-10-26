@@ -2,6 +2,8 @@
 
 restspec is an API specification format for hypermedia-based APIs.
 
+[Why use hypermedia to build an API?](docs/why-hypermedia.md)
+
 ## Why restspec?
 
 Hypermedia-based APIs return links that clients should use to navigate the API
