@@ -16,10 +16,10 @@ links calls for a specification format designed around hypermedia.
 
 ## Quick Start
 
-Requires Node.js 22 or newer and npm. Install the library in your project:
+Requires Node.js 22 or newer and pnpm. Install the library in your project:
 
 ```sh
-npm install @kewne/restspec
+pnpm add @kewne/restspec
 ```
 
 An entrypoint specification identifies the API's root profile and environment URL:
@@ -65,7 +65,7 @@ referenced schemas. With the entrypoint in `restspec.yml`, profiles in
 `profiles/`, and schemas at their referenced paths, generate a TypeScript module:
 
 ```sh
-npx restspec generate-types restspec.yml --profiles profiles --out generated/types.ts
+pnpm exec restspec generate-types restspec.yml --profiles profiles --out generated/types.ts
 ```
 
 Using the checklist specification, follow a GET link from an application module

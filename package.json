@@ -13,6 +13,7 @@
   "license": "ISC",
   "author": "kewne@protonmail.com",
   "type": "module",
+  "packageManager": "pnpm@12.15.0",
   "exports": {
     "types": "./dist/base-types.d.ts",
     "default": "./dist/base-types.js"
@@ -33,8 +34,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck:test": "tsc -p tsconfig.test.json",
-    "test": "npm run build && npm run typecheck:test && vitest run",
-    "prepack": "npm run build"
+    "test": "pnpm run build && pnpm run typecheck:test && vitest run",
+    "prepack": "pnpm run build"
   },
   "dependencies": {
     "quicktype-core": "^26.0.0",

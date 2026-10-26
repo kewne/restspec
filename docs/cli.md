@@ -1,16 +1,16 @@
 # TypeScript Type Generation
 
-Requires Node.js 22 or newer and npm. Install the library in your project:
+Requires Node.js 22 or newer and pnpm. Install the library in your project:
 
 ```sh
-npm install @kewne/restspec
+pnpm add @kewne/restspec
 ```
 
 With your entrypoint specification in `restspec.yml` and your profile files in
 `profiles/`, generate a TypeScript module:
 
 ```sh
-npx restspec generate-types restspec.yml --profiles profiles --out generated/types.ts
+pnpm exec restspec generate-types restspec.yml --profiles profiles --out generated/types.ts
 ```
 
 Import the generated module from your application as shown in the
@@ -21,7 +21,7 @@ for sample inputs.
 
 ## Command Options
 
-Use `npx restspec --help` for usage or `npx restspec --version` for the package version.
+Use `pnpm exec restspec --help` for usage or `pnpm exec restspec --version` for the package version.
 `generate-types` accepts either:
 
 - the entrypoint specification file as its positional argument and an optional
@@ -50,7 +50,7 @@ profiles:
 For a config saved as `restspec.config.yml`, run:
 
 ```sh
-npx restspec generate-types --config restspec.config.yml --out generated/types.ts
+pnpm exec restspec generate-types --config restspec.config.yml --out generated/types.ts
 ```
 
 [Return to the overview](../README.md).

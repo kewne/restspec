@@ -557,18 +557,17 @@ test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s typ
 test("root export resolves ApiRoot from the packed package", async () => {
   const project = await fixture();
   success(project.generate());
-  const packed = spawnSync("npm", ["pack", "--json", "--pack-destination", project.directory], {
+  const archive = join(project.directory, "restspec.tgz");
+  const packed = spawnSync("pnpm", ["pack", "--out", archive], {
     cwd: root, encoding: "utf8", timeout: 20_000,
   });
   expect(packed.error).toBeUndefined();
   expect(packed.status, packed.stdout + packed.stderr).toBe(0);
-  const packages: { filename: string }[] = JSON.parse(packed.stdout);
-  expect(packages).toHaveLength(1);
   const packageDirectory = join(project.directory, "node_modules/@kewne/restspec");
   await rm(packageDirectory);
   await mkdir(packageDirectory);
   const extracted = spawnSync("tar", [
-    "-xzf", join(project.directory, packages[0]!.filename),
+    "-xzf", archive,
     "--strip-components=1", "-C", packageDirectory,
   ], { encoding: "utf8" });
   success(extracted);

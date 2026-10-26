@@ -3,16 +3,21 @@
 {
 	"name": "Node.js & TypeScript",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/typescript-node:5-24-trixie"
+	"image": "mcr.microsoft.com/devcontainers/typescript-node:5-24-trixie",
+	"remoteEnv": {
+		"PNPM_HOME": "/home/node/.local/share/pnpm",
+		"PATH": "/home/node/.local/share/pnpm/bin:${containerEnv:PATH}"
+	},
+	"postCreateCommand": [
+		"bash", "-euo", "pipefail", "-c",
+		"curl -fsSL https://get.pnpm.io/install.sh | env PNPM_VERSION=\"$(node -p \"require('./package.json').packageManager.split('@')[1]\")\" SHELL=/bin/bash sh - && pnpm install --frozen-lockfile"
+	]
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
-
-	// Use 'postCreateCommand' to run commands after the container is created.
-	// "postCreateCommand": "yarn install",
 
 	// Configure tool-specific properties.
 	// "customizations": {},
