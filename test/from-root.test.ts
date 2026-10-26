@@ -151,6 +151,164 @@ test("parseHalResource handles non-object payloads", () => {
   expect(scalar.properties).toBe("hello");
 });
 
+const standardMethods = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
+const bodyMethods = ["post", "put", "patch", "delete", "options"] as const;
+type BodyMethods = { [method in typeof bodyMethods[number]]: [unknown, TestRoot] };
+
+test.each(standardMethods)("request.%s sends the verb, credentials, and Accept without an implicit body", async (method) => {
+  let receivedMethod: string | undefined;
+  let receivedHeaders: IncomingMessage["headers"] = {};
+  let receivedBody = "";
+  const baseUrl = await startTestServer((req, res) => {
+    receivedMethod = req.method;
+    receivedHeaders = req.headers;
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => { receivedBody += chunk; });
+    req.on("end", () => res.end(JSON.stringify({ version: "2.0.0" })));
+  });
+
+  const result = await fromHref(baseUrl, {
+    credentials: { type: "bearer", token: "method-token" },
+  }).request[method]();
+
+  expect(receivedMethod).toBe(method.toUpperCase());
+  expect(receivedHeaders.accept).toBe("application/hal+json, application/json");
+  expect(receivedHeaders.authorization).toBe("Bearer method-token");
+  expect(receivedHeaders["content-type"]).toBeUndefined();
+  expect(receivedBody).toBe("");
+  if (method === "head") {
+    expect(result).toBeUndefined();
+  } else {
+    expect(result).toMatchObject({ properties: { version: "2.0.0" } });
+  }
+});
+
+test.each(bodyMethods)("request.%s serializes supplied JSON payloads", async (method) => {
+  const requests: { body: string; contentType: string | undefined; method: string | undefined }[] = [];
+  const baseUrl = await startTestServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => { body += chunk; });
+    req.on("end", () => {
+      requests.push({ body, contentType: req.headers["content-type"], method: req.method });
+      res.end(JSON.stringify({ version: "2.0.0" }));
+    });
+  });
+  const apiRoot: ApiRoot<TestRoot, { local: string }, BodyMethods> = {
+    env: { local: baseUrl },
+    profile: "https://example.test/profiles/root",
+  };
+  const link = fromRoot(apiRoot, "local");
+  const payloads = [{ title: "New checklist", items: [] }, false, 0, "", null, undefined];
+
+  for (const payload of payloads) {
+    const resource = await link.request[method](payload);
+    expect(resource.properties).toEqual({ version: "2.0.0" });
+  }
+
+  expect(requests).toEqual(payloads.map((payload) => ({
+    body: payload === undefined ? "" : JSON.stringify(payload),
+    contentType: payload === undefined ? undefined : "application/json",
+    method: method.toUpperCase(),
+  })));
+});
+
+test.each(standardMethods)("request.%s returns undefined for successful empty responses", async (method) => {
+  const baseUrl = await startTestServer((req, res) => {
+    res.statusCode = Number(req.url!.slice(1));
+    res.end();
+  });
+
+  for (const status of [200, 204, 205]) {
+    await expect(fromHref(`${baseUrl}/${status}`).request[method]()).resolves.toBeUndefined();
+  }
+});
+
+test.each(["get", "head"] as const)("request.%s does not send a body even with an explicit request tuple", async (method) => {
+  let receivedBody = "";
+  let contentType: string | undefined;
+  const baseUrl = await startTestServer((req, res) => {
+    contentType = req.headers["content-type"];
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => { receivedBody += chunk; });
+    req.on("end", () => res.end());
+  });
+  const apiRoot: ApiRoot<TestRoot, { local: string }, {
+    get: [{ title: string }, TestRoot];
+    head: [{ title: string }, TestRoot];
+  }> = {
+    env: { local: baseUrl },
+    profile: "https://example.test/profiles/root",
+  };
+
+  await expect(fromRoot(apiRoot, "local").request[method]({ title: "ignored" })).resolves.toBeUndefined();
+  expect(receivedBody).toBe("");
+  expect(contentType).toBeUndefined();
+});
+
+test.each(standardMethods)("request.%s rejects HTTP errors before handling an empty body", async (method) => {
+  const baseUrl = await startTestServer((_req, res) => {
+    res.statusCode = 503;
+    res.statusMessage = "Service Unavailable";
+    res.end();
+  });
+
+  await expect(fromHref(baseUrl).request[method]()).rejects.toThrow(
+    `${baseUrl}: HTTP 503 Service Unavailable`,
+  );
+});
+
+test.each(["not json", " "])("nonempty invalid JSON %j is not treated as an empty response", async (body) => {
+  const baseUrl = await startTestServer((_req, res) => res.end(body));
+  await expect(fromHref(baseUrl).request.post()).rejects.toThrow(SyntaxError);
+});
+
+test("JSON null is parsed as a resource rather than an empty response", async () => {
+  const baseUrl = await startTestServer((_req, res) => res.end("null"));
+  await expect(fromHref(baseUrl).request.post()).resolves.toMatchObject({ properties: null });
+});
+
+test.each([false, true])("non-GET HAL navigation resolves relative links and scopes credentials (map: %s)", async (useMap) => {
+  const requests: { method: string | undefined; authorization: string | undefined; url: string | undefined }[] = [];
+  const externalUrl = await startTestServer((req, res) => {
+    requests.push({ method: req.method, authorization: req.headers.authorization, url: req.url });
+    res.end("{}");
+  });
+  const baseUrl = await startTestServer((req, res) => {
+    requests.push({ method: req.method, authorization: req.headers.authorization, url: req.url });
+    res.end(JSON.stringify({
+      version: "2.0.0",
+      _links: {
+        related: { href: "child", name: "subscription", title: "User Subscription" },
+        external: { href: externalUrl },
+      },
+    }));
+  });
+  const apiRoot: ApiRoot<TestRoot, { local: string }, { post: [void, TestRoot] }> = {
+    env: { local: `${baseUrl}/api/root` },
+    profile: "https://example.test/profiles/root",
+  };
+  const credentials = { type: "bearer", token: "root-token" } as const;
+  const resource = await fromRoot(apiRoot, "local", {
+    credentials: useMap ? {
+      [baseUrl]: credentials,
+      [externalUrl]: { type: "bearer", token: "external-token" },
+    } : credentials,
+  }).request.post();
+
+  const child = resource.rels.related.subscription;
+  expect(child.href).toBe(`${baseUrl}/api/child`);
+  expect(child.name).toBe("subscription");
+  expect(child.title).toBe("User Subscription");
+  await child.request.patch();
+  await resource.getRel<{ delete: [void, unknown] }>("external")[0]!.request.delete();
+  expect(requests).toEqual([
+    { method: "POST", authorization: "Bearer root-token", url: "/api/root" },
+    { method: "PATCH", authorization: "Bearer root-token", url: "/api/child" },
+    { method: "DELETE", authorization: useMap ? "Bearer external-token" : undefined, url: "/" },
+  ]);
+});
+
 test.each([
   ["origin", "Bearer origin-token"],
   ["host", "Bearer host-token"],

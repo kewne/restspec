@@ -81,10 +81,6 @@ const subscription = await root.rels.related.subscription.request.get();
 console.log(subscription.properties.status);
 ```
 
-**Runtime limitation:** only GET without request bodies is currently implemented.
-The POST creation and PUT replacement calls below demonstrate TypeScript
-contracts only and cannot currently be executed.
-
 POST uses generated, type-safe navigation and request methods. The request body
 and response type are inferred from the target profile's schemas:
 

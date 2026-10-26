@@ -32,15 +32,25 @@ Relation types and names containing punctuation use bracket access, such as
 `checklist.rels["create-from"].instance`. Descriptions without a name are available
 only through `getRel`.
 
-## Runtime Limitations
+## HTTP Requests
 
-**Links currently execute only GET requests without request bodies.**
-Method-specific schemas and explicit tuples provide TypeScript contracts;
-they do not implement POST, PUT, PATCH, DELETE, HEAD, OPTIONS, or GET request-body
-serialization. The POST and PUT examples below illustrate type contracts only
-and cannot currently be executed.
+Links execute GET, POST, PUT, PATCH, DELETE, HEAD, and OPTIONS requests through
+the corresponding lowercase `request` methods. POST, PUT, PATCH, DELETE, and
+OPTIONS serialize supplied payloads as JSON and send `Content-Type: application/json`.
+An `undefined` payload omits both the body and its content type. GET and HEAD
+never send request bodies, even when a schema or explicit tuple declares one.
 
-## POST and PUT Contracts
+All methods send `Accept: application/hal+json, application/json` and use the
+same destination-scoped credentials. Nonempty JSON responses become resources
+with `properties`, `getRel`, and `rels`, including navigable relative links.
+HEAD, HTTP 204/205, and other successful responses with an empty body resolve to
+`undefined`. Method tuples remain unchanged, so a declared response resource
+does not guarantee a body at runtime. Invalid nonempty JSON rejects.
+
+Non-success HTTP responses reject with an error containing the requested URL,
+status code, and status text, including for HEAD requests.
+
+## POST and PUT
 
 POST creates a checklist using a request and response inferred from the example
 specification:
@@ -72,7 +82,6 @@ the API's contract.
 
 Use explicit `getRel` tuples for caller-known contracts absent from the
 specification. Each tuple specifies a request body and a response resource.
-This POST example is also type-contract-only:
 
 ```ts
 import type { Checklist } from "../generated/types.js";
@@ -91,7 +100,8 @@ if (createLink) {
 and `request` properties. Other common HTTP methods accept `void` and return
 `Promise<unknown>`. Untyped links, external targets, and `getRel` calls without
 explicit tuples use those same defaults. Custom methods remain available
-through explicit `getRel` tuples.
+as type contracts through explicit `getRel` tuples, but only the seven standard
+methods listed above are implemented at runtime.
 
 ## Entering Through a Resource URL
 

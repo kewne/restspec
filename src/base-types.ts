@@ -60,6 +60,31 @@ export function createLink<RESOURCE = unknown>(
     title?: string,
     credentialsMap?: CredentialsMap,
 ): Link<{ get: [void, RESOURCE] }> {
+    async function execute(method: HttpMethod, reqBody?: unknown): Promise<unknown> {
+        const credentials = credentialsForUrl(href, credentialsMap)
+        const requestBody = method !== 'get' && method !== 'head' && reqBody !== undefined
+            ? JSON.stringify(reqBody) : undefined
+        const response = await fetch(href, {
+            method: method.toUpperCase(),
+            ...(requestBody !== undefined ? { body: requestBody } : {}),
+            headers: {
+                Accept: "application/hal+json, application/json",
+                ...(requestBody !== undefined ? { "Content-Type": "application/json" } : {}),
+                ...(credentials?.type === 'bearer'
+                    ? { Authorization: `Bearer ${credentials.token}` } : {}),
+            },
+        })
+        if (!response.ok) {
+            throw new Error(`${href}: HTTP ${response.status} ${response.statusText}`)
+        }
+        if (method === 'head' || response.status === 204 || response.status === 205) return undefined
+        const responseText = await response.text()
+        if (responseText.length === 0) return undefined
+        const body: unknown = JSON.parse(responseText)
+        return parseHalResource(body, (childHref, childName, childTitle) =>
+            createLink(new URL(childHref, response.url || href).href, childName, childTitle, credentialsMap))
+    }
+
     return {
         ...(name !== undefined ? { name } : {}),
         ...(title !== undefined ? { title } : {}),
@@ -67,22 +92,13 @@ export function createLink<RESOURCE = unknown>(
             return href
         },
         request: {
-            async get(): Promise<RESOURCE> {
-                const credentials = credentialsForUrl(href, credentialsMap)
-                const response = await fetch(href, {
-                    headers: {
-                        Accept: "application/hal+json, application/json",
-                        ...(credentials?.type === 'bearer'
-                            ? { Authorization: `Bearer ${credentials.token}` } : {}),
-                    },
-                })
-                if (!response.ok) {
-                    throw new Error(`${href}: HTTP ${response.status} ${response.statusText}`)
-                }
-                const body: unknown = await response.json()
-                return parseHalResource<RESOURCE>(body, (childHref, childName, childTitle) =>
-                    createLink(new URL(childHref, response.url || href).href, childName, childTitle, credentialsMap))
-            },
+            get: () => execute('get'),
+            post: (reqBody?: unknown) => execute('post', reqBody),
+            put: (reqBody?: unknown) => execute('put', reqBody),
+            patch: (reqBody?: unknown) => execute('patch', reqBody),
+            delete: (reqBody?: unknown) => execute('delete', reqBody),
+            head: () => execute('head'),
+            options: (reqBody?: unknown) => execute('options', reqBody),
         } as Link<{ get: [void, RESOURCE] }>["request"],
     }
 }
