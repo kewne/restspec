@@ -1,6 +1,6 @@
 {
   "name": "@kewne/restspec",
-  "version": "0.3.0-beta.4",
+  "version": "0.3.0-beta.5",
   "description": "Generate TypeScript types from restspec JSON schemas.",
   "homepage": "https://github.com/kewne/restspec#readme",
   "bugs": {
