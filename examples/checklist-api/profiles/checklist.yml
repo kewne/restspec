@@ -3,7 +3,14 @@ schema:
   application/json:
     get:
       response: ../schemas/json/checklist.json
+    put:
+      request: ../schemas/json/replace-checklist.json
+      response: ../schemas/json/checklist.json
 rels:
+  edit:
+    - name: checklist
+      description: Replaces this checklist's title and items.
+      profile: https://checklists.keeoon.dev/profiles/checklist
   create-from:
     - name: instance
       description: Creates an instance from this checklist.
