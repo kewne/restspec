@@ -262,7 +262,7 @@ export async function generateTypes(
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointLabel);
   const profiles = new Map<string, string>();
   const profileMethods = new Map<string, Record<string, { request?: string; response?: string }>>();
-  const profileRelations = new Map<string, { relation: string; name: string; profile: string }[]>();
+  const profileRelations = new Map<string, Map<string, { name: string; profile: string }[]>>();
   const schemaLocations = new Map<string, Location>();
   const responseSchemas = new Set<string>();
 
@@ -277,7 +277,7 @@ export async function generateTypes(
       throw new Error(`${label}: duplicate profile URI ${uri} (also in ${profiles.get(uri)})`);
     }
     profiles.set(uri, label);
-    const relations: { relation: string; name: string; profile: string }[] = [];
+    const relations = new Map<string, { name: string; profile: string }[]>();
     profileRelations.set(uri, relations);
     if (profile.rels !== undefined) {
       if (!isMapping(profile.rels)) {
@@ -287,6 +287,8 @@ export async function generateTypes(
         if (!Array.isArray(descriptions)) {
           throw new Error(`${label}: rels.${relation} must be an array`);
         }
+        const targets: { name: string; profile: string }[] = [];
+        relations.set(relation, targets);
         for (const description of descriptions) {
           if (!isMapping(description)) {
             throw new Error(`${label}: rels.${relation} entries must be mappings`);
@@ -294,7 +296,7 @@ export async function generateTypes(
           const target = requiredString(description.profile, `rels.${relation}.profile`, label);
           if (description.name !== undefined) {
             const name = requiredString(description.name, `rels.${relation}.name`, label);
-            relations.push({ relation, name, profile: target });
+            targets.push({ name, profile: target });
           }
         }
       }
@@ -391,19 +393,19 @@ export async function generateTypes(
       ...(bodies.response === undefined ? {} : { response: sourceNames.get(bodies.response)! }),
     }]),
   );
-  const relations = new Map<string, { relation: string; name: string; methods: MethodSources }[]>();
-  for (const [profile, descriptions] of profileRelations) {
+  const relations = new Map<string, Map<string, { name: string; methods: MethodSources }[]>>();
+  for (const [profile, groups] of profileRelations) {
     const responses = new Set(Object.values(methodsFor(profile)).map((bodies) => bodies.response));
     for (const sourceName of responses) {
       if (sourceName === undefined) continue;
-      const entries = relations.get(sourceName) ?? [];
+      const entries = relations.get(sourceName) ?? new Map<string, { name: string; methods: MethodSources }[]>();
       relations.set(sourceName, entries);
-      for (const description of descriptions) {
-        entries.push({
-          relation: description.relation,
-          name: description.name,
-          methods: methodsFor(description.profile),
-        });
+      for (const [relation, descriptions] of groups) {
+        const targets = entries.get(relation) ?? [];
+        entries.set(relation, targets);
+        for (const description of descriptions) {
+          targets.push({ name: description.name, methods: methodsFor(description.profile) });
+        }
       }
     }
   }

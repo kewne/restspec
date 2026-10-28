@@ -123,12 +123,12 @@ client.${method}(link, { properties: body });
 // @ts-expect-error Incorrect request property types are rejected.
 client.${method}(link, { title: 123 });
 declare const resource${method}: Payload;
-export const named${method}: Promise<Payload> = client.${method}(resource${method}.rels.related.self, body);
+export const named${method}: Promise<Payload> = client.${method}(resource${method}.getNamedLink("related", "self")!, body);
 `).join("\n")}
 declare const resource: Payload;
-export const external: Promise<unknown> = client.post(resource.rels.related.external);
+export const external: Promise<unknown> = client.post(resource.getNamedLink("related", "external")!);
 // @ts-expect-error External targets have no request schema.
-client.post(resource.rels.related.external, body);
+client.post(resource.getNamedLink("related", "external")!, body);
 // @ts-expect-error Links no longer execute requests.
 link.request;
 `);
@@ -206,7 +206,7 @@ export const wrongResponse: Promise<Payload> = client.post(link, { id: "new" });
 // @ts-expect-error An absent request schema forbids a body.
 client.patch(link, { id: "new" });
 declare const updated: Updated;
-export const named: Promise<Payload> = client.get(updated.rels.related.self);
+export const named: Promise<Payload> = client.get(updated.getNamedLink("related", "self")!);
 // @ts-expect-error Request slots sharing a response schema still require plain payloads.
 client.post(link, { properties: { id: "new" } });
 `);
@@ -279,7 +279,7 @@ test("unions duplicate named link targets independently for each method", async 
 import type { Payload, Child } from "./generated/types.js";
 const client = createHttpClient();
 declare const resource: Payload;
-const target = resource.rels.related.target;
+const target = resource.getNamedLink("related", "target")!;
 export const response: Promise<Payload | Child> = client.get(target);
 export const body: Promise<unknown> = client.post(target, "new");
 export const absentBody: Promise<unknown> = client.post(target);
@@ -308,8 +308,20 @@ test("resource wrapper nests payload properties without wrapping nested objects"
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface Payload \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
   expect(types.match(/export interface /g)).toHaveLength(1);
-  expect(types).toContain("getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];");
-  expect(types).toContain("get rels(): {");
+  expect(types).toContain("getRel(rel: string): Link[];");
+  expect(types).toContain("getNamedLink(rel: string, name: string): Link | undefined;");
+  expect(types.match(/getRel\(/g)).toHaveLength(1);
+  expect(types.match(/getNamedLink\(/g)).toHaveLength(1);
+  await compileConsumer(project, `import { createHttpClient } from "@kewne/restspec";
+import type { Payload } from "./generated/types.js";
+declare const resource: Payload;
+const link = resource.getNamedLink("unknown", "unknown");
+if (link) {
+  const result: Promise<unknown> = createHttpClient().get(link);
+  // @ts-expect-error Resources with no known named links still use an untyped fallback.
+  const wrong: Promise<Payload> = createHttpClient().get(link);
+}
+`);
 });
 
 test.each([false, true])("inlines schema properties while retaining recursive references (nullable: %s)", async (nullable) => {
@@ -339,7 +351,65 @@ export const tree: Node["properties"] = { value: "root", children: [{ value: "le
   expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
 });
 
-test("getRel uses caller-supplied Methods and returns typed Link arrays", async () => {
+test("emits a known-rel union and untyped fallbacks while preserving named link contracts", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
+    rels: {
+      related: [{ name: "self", profile: rootProfile }],
+      item: [{ profile: rootProfile }],
+      empty: [],
+      'urn:custom"rel': [{ name: 'named"link', profile: rootProfile }],
+    },
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).toContain('getRel(rel: "related" | "item" | "empty" | "urn:custom\\"rel"): Link[];');
+  expect(types.match(/getRel\(/g)).toHaveLength(2);
+  expect(types).toContain("getRel(rel: string): Link[];");
+  expect(types).toContain("getNamedLink(rel: string, name: string): Link | undefined;");
+  expect(types).not.toContain("get rels()");
+  await compileConsumer(project, `import { createHttpClient } from "@kewne/restspec";
+import type { Link } from "@kewne/restspec";
+import type { Payload } from "./generated/types.js";
+declare const resource: Payload;
+declare const rel: string;
+declare const name: string;
+const client = createHttpClient();
+export const known: Link[] = resource.getRel("related");
+export const unnamed: Link[] = resource.getRel("item");
+export const empty: Link[] = resource.getRel("empty");
+export const unknown: Link[] = resource.getRel("unknown");
+export const dynamic: Link[] = resource.getRel(rel);
+const self = resource.getNamedLink("related", "self");
+if (self) {
+  const response: Promise<Payload> = client.get(self);
+}
+const fallback = resource.getNamedLink(rel, name);
+if (fallback) {
+  const response: Promise<unknown> = client.get(fallback);
+  // @ts-expect-error Dynamic strings cannot infer a known resource.
+  const wrong: Promise<Payload> = client.get(fallback);
+}
+const missing = resource.getNamedLink("unknown", "self");
+const wrongPair = resource.getNamedLink("item", "self");
+if (wrongPair) {
+  // @ts-expect-error A name known on a different rel still uses the fallback.
+  const wrong: Promise<Payload> = client.get(wrongPair);
+}
+// @ts-expect-error Named links may be absent from a response.
+client.get(self);
+// @ts-expect-error Even a known getRel name returns untyped links.
+const wrong: Promise<Payload> = client.get(known[0]);
+// @ts-expect-error getRel does not accept a caller-supplied contract.
+resource.getRel<{ get: [void, Payload] }>("related");
+// @ts-expect-error The rels property was removed.
+resource.rels;
+`);
+});
+
+test("named links preserve target types while general relation processing stays untyped", async () => {
   const project = await fixture();
   const childProfile = "https://example.test/profiles/child";
   await project.put("profiles/root.yml", {
@@ -361,36 +431,38 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types.match(/getRel<METHODS extends Methods = {}>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
-  expect(types).toContain("get rels(): {");
+  expect(types.match(/getRel\(rel: string\): Link\[\];/g)).toHaveLength(2);
+  expect(types).toContain('getRel(rel: "related" | "create" | "create-from" | "urn:custom" | "empty"): Link[];');
   const consumer = await project.put("consumer.ts", `import { createHttpClient } from "@kewne/restspec";
-import type { HttpClient, Link, Methods } from "@kewne/restspec";
+import type { HttpClient, Link } from "@kewne/restspec";
 import type { Payload, Child } from "./generated/types.js";
 const client: HttpClient = createHttpClient();
 declare const resource: Payload;
 export const properties: string = resource.properties.id;
-export const namedChild: Promise<Child> = client.get(resource.rels.related.child);
-export const namedParent: Promise<Payload> = client.get(({} as Child).rels.related.parent);
-export const namedExternal: Promise<unknown> = client.get(resource.rels.related.external);
-export const namedCustom: Promise<Payload> = client.get(resource.rels["urn:custom"].self);
-export const namedCreate: Promise<unknown> = client.post(resource.rels["create-from"].child);
-// @ts-expect-error Unknown link names are not exposed.
-resource.rels.related.missing;
-// @ts-expect-error Unknown relations are not exposed.
-resource.rels.missing;
-// @ts-expect-error Named links are getters.
-resource.rels.related.child = resource.rels.related.child;
-// @ts-expect-error The relationship index is a getter.
-resource.rels = resource.rels;
+export const namedChild: Promise<Child> = client.get(resource.getNamedLink("related", "child")!);
+export const namedParent: Promise<Payload> = client.get(({} as Child).getNamedLink("related", "parent")!);
+export const namedExternal: Promise<unknown> = client.get(resource.getNamedLink("related", "external")!);
+export const namedCustom: Promise<Payload> = client.get(resource.getNamedLink("urn:custom", "self")!);
+export const namedCreate: Promise<unknown> = client.post(resource.getNamedLink("create-from", "child")!);
+export const missingName: Link | undefined = resource.getNamedLink("related", "missing");
+export const missingRel: Link | undefined = resource.getNamedLink("missing", "child");
+export const fallbackResult: Promise<unknown> = client.get(missingName!);
+// @ts-expect-error Unknown named links have no request schema.
+client.post(missingName!, { label: "child" });
+// @ts-expect-error Unknown named links do not infer a local response type.
+const incorrectFallback: Promise<Child> = client.get(missingRel!);
+// @ts-expect-error The relationship index no longer exists.
+resource.rels;
 // @ts-expect-error Local target response types are preserved.
-const incorrectTarget: Promise<Payload> = client.get(resource.rels.related.child);
-type CreateMethods = { post: [{ label: string }, Child] };
-export const links: Link<CreateMethods>[] = resource.getRel<CreateMethods>("create-from");
+const incorrectTarget: Promise<Payload> = client.get(resource.getNamedLink("related", "child")!);
+export const links: Link[] = resource.getRel("create-from");
 export const name: string | undefined = links[0].name;
 export const title: string | undefined = links[0].title;
-export const created: Promise<Child> = client.post(links[0], { label: "child" });
-export const parent: Promise<Payload> = client.get(({} as Child).getRel<{ get: [void, Payload] }>("related")[0]);
-export const custom: Link<Methods>[] = resource.getRel<Methods>("urn:custom");
+export const created: Promise<unknown> = client.post(links[0]);
+// @ts-expect-error Known getRel arguments still cannot supply request schemas.
+client.post(links[0], { label: "child" });
+export const parent: Promise<unknown> = client.get(({} as Child).getRel("related")[0]);
+export const custom: Link[] = resource.getRel("urn:custom");
 export const unspecified: Link[] = resource.getRel("not-in-the-spec");
 declare const defaults: Link;
 export const defaultGet: Promise<unknown> = client.get(defaults);
@@ -428,7 +500,8 @@ declare const defaults: Link;
 const wrongDefault: Promise<string> = client.get(defaults);
 const wrongInferredDefault: Promise<string> = client.post(resource.getRel("related")[0]);
 const wrongBody: string = {} as Parameters<typeof client.post<{}>>[1];
-client.post(resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0], { label: 123 });
+declare const typedLink: Link<{ post: [{ label: string }, Payload] }>;
+client.post(typedLink, { label: 123 });
 `);
   const invalid = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
@@ -436,7 +509,7 @@ client.post(resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0]
   ], { encoding: "utf8" });
   expect(invalid.error).toBeUndefined();
   expect(invalid.status).not.toBe(0);
-  expect(invalid.stdout).toContain("does not satisfy the constraint 'Methods'");
+  expect(invalid.stdout).toContain("Expected 0 type arguments");
   expect(invalid.stdout).toContain("href");
   expect(invalid.stdout).toContain("Property 'get' does not exist");
   expect(invalid.stdout).toContain("Type 'string' is not assignable to type 'void'");
@@ -449,7 +522,7 @@ test("root export uses the generated root schema type name", async () => {
   const project = await fixture({ ...basicSchema, title: "Root payload" });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toContain('import type { ApiRoot, Link, Methods } from "@kewne/restspec";');
+  expect(types).toContain('import type { ApiRoot, Link } from "@kewne/restspec";');
   expect(types).toContain("export interface RootPayload");
   expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; },");
   expect(types).toContain(`    env: {
@@ -483,15 +556,16 @@ test("root export follows its profile rather than discovery order and shares sch
   await project.put("profiles/alias.yml", {
     profile: "https://example.test/profiles/alias",
     schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
-    rels: { related: [{ name: "root", profile: rootProfile }] },
+    rels: { related: [{ name: "root", profile: rootProfile }], item: [{ profile: rootProfile }], empty: [] },
   });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface First \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
   expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; },");
-  expect(types.match(/getRel<METHODS extends Methods = {}>/g)).toHaveLength(2);
-  expect(types).toContain('get "root"(): Link<{ get: [void, Payload];');
+  expect(types.match(/getRel\(rel: string\)/g)).toHaveLength(2);
+  expect(types).toContain('getRel(rel: "related" | "item" | "empty"): Link[];');
+  expect(types).toContain('getNamedLink(rel: "related", name: "root"): Link<{ get: [void, Payload];');
 });
 
 test("root export falls back to unknown without a root JSON schema", async () => {
@@ -636,7 +710,7 @@ export async function readRoot(): Promise<Payload> {
   return resource;
 }
 declare const resource: Payload;
-export const links: Link<{ get: [void, Payload] }>[] = resource.getRel<{ get: [void, Payload] }>("related");
+export const links: Link[] = resource.getRel("related");
 const bookmarked = fromHref<Payload>("https://api.example.com/resources/123");
 export const bookmarkLink: Link<{ get: [void, Payload] }> = bookmarked;
 export const bookmarkName: string | undefined = bookmarked.name;
@@ -679,7 +753,7 @@ test("generates all example types as deterministic, strict-compilable exports", 
   ];
   success(invoke(args, tmpdir()));
   const types = await readFile(output, "utf8");
-  for (const name of ["Root", "Checklist", "ChecklistInstance", "Subscription"]) {
+  for (const name of ["Root", "Checklist", "ChecklistInstance", "Subscription", "List"]) {
     expect(types).toMatch(new RegExp(`export (?:interface|type) ${name}\\b`));
   }
   expect(types).toMatch(/checklistId:\s*(?:null \| string|string \| null);/);
@@ -688,7 +762,7 @@ test("generates all example types as deterministic, strict-compilable exports", 
   expect(types).toMatch(/description\?:\s*string;/);
   expect(types).toMatch(/createdAt:\s*string;/);
   expect(types).toMatch(/"ACTIVE" \| "INACTIVE"/);
-  expect(types.match(/export interface /g)).toHaveLength(4);
+  expect(types.match(/export interface /g)).toHaveLength(5);
   expect(types).not.toMatch(/\b(?:FluffyItem|PurpleItem|Completed|Status)\b/);
   expect(types).not.toMatch(/\b(?:Convert|Date|enum|function)\b/);
   expect(types.endsWith("\n")).toBe(true);
@@ -711,21 +785,26 @@ export type Payloads = Root | Checklist | ChecklistInstance | Subscription;
 export const nullableId: ChecklistInstance["properties"]["checklistId"] = null;
 export const timestamp: ChecklistInstance["properties"]["createdAt"] = "2026-10-17T00:00:00Z";
 declare const resource: Root;
-export const related = resource.getRel<{ get: [void, Subscription] }>("related");
-export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
+export const related = resource.getRel("related");
+export const created = resource.getRel("create");
 export async function typeSafeAccess() {
   const resource = await client.get(fromRoot(root, "local"));
-  const created: Checklist = await client.post(resource.rels.create.checklists, { title: "My New Checklist" });
+  const createLink = resource.getNamedLink("create", "checklists");
+  const subscriptionLink = resource.getNamedLink("related", "subscription");
+  if (!createLink || !subscriptionLink) return;
+  const created: Checklist = await client.post(createLink, { title: "My New Checklist" });
   // @ts-expect-error Checklist creation requires a title.
-  client.post(resource.rels.create.checklists, {});
+  client.post(createLink, {});
   // @ts-expect-error Checklist titles must be strings.
-  client.post(resource.rels.create.checklists, { title: 123 });
+  client.post(createLink, { title: 123 });
   // @ts-expect-error Checklist creation requires a request body.
-  client.post(resource.rels.create.checklists);
-  // @ts-expect-error The list profile only defines POST, not a GET response.
-  const invalidGet: Promise<Checklist> = client.get(resource.rels.create.checklists);
-  const subscription: Subscription = await client.get(resource.rels.related.subscription);
-  const instance: ChecklistInstance = await client.get(created.rels["create-from"].instance);
+  client.post(createLink);
+  // @ts-expect-error The collection GET response is not a checklist.
+  const invalidGet: Promise<Checklist> = client.get(createLink);
+  const subscription: Subscription = await client.get(subscriptionLink);
+  const instanceLink = created.getNamedLink("create-from", "instance");
+  if (!instanceLink) return;
+  const instance: ChecklistInstance = await client.get(instanceLink);
   return { created, subscription, instance };
 }
 `);
@@ -1105,7 +1184,7 @@ test("dereferences https: URLs for entrypoint, profiles, and schemas in config",
   const types = await readFile(project.output, "utf8");
   expect(types).toContain("export interface RemoteRoot");
   expect(types).toContain("export interface MappedResource");
-  expect(types).toContain('get "mapped"(): Link<{ get: [void, MappedResource];');
+  expect(types).toContain('getNamedLink(rel: "related", name: "mapped"): Link<{ get: [void, MappedResource];');
   expect(types).toContain("export const root: ApiRoot<RemoteRoot, { production: string; },");
   await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";

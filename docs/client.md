@@ -15,23 +15,27 @@ import { root as apiRoot } from "../generated/types.js";
 
 const client = createHttpClient();
 const root = await client.get(fromRoot(apiRoot, "local"));
-const subscription = await client.get(root.rels.related.subscription);
+const subscriptionLink = root.getNamedLink("related", "subscription");
+if (!subscriptionLink) throw new Error("Subscription link unavailable");
+const subscription = await client.get(subscriptionLink);
 ```
 
 Example imports assume the application module is in `src/`, with generated
 types in `generated/` at the project root. A compatible API server must be
 running at the selected environment's entrypoint URL.
 
-Resources expose a read-only `rels` getter, grouped by relation type and known
-link name. Named links infer each method's request payload and response resource
+Resources expose `getNamedLink(rel, name)` to look up a named link within a
+relation. Known relation/name pairs infer each method's request payload and response resource
 from the target profile's JSON schemas. The checklist example declares GET
 response schemas and a checklist POST request with a required string `title`.
-Its `client.post(root.rels.create.checklists, { title: "New checklist" })`
-contract infers a checklist response resource.
+Its `getNamedLink("create", "checklists")` result carries a POST contract
+that infers a checklist response resource. Named links may be absent from an
+actual response, so check for `undefined` before following them.
 
-Relation types and names containing punctuation use bracket access, such as
-`checklist.rels["create-from"].instance`. Descriptions without a name are available
-only through `getRel`.
+Relation types and names containing punctuation are ordinary string arguments,
+such as `checklist.getNamedLink("create-from", "instance")`. Unknown pairs and
+widened string arguments are accepted by a fallback returning an untyped
+`Link | undefined`. Descriptions without a name are available only through `getRel`.
 
 ## HTTP Requests
 
@@ -50,7 +54,7 @@ never send request bodies, even when a schema or explicit tuple declares one.
 
 All methods send `Accept: application/hal+json, application/json` and use the
 same destination-scoped credentials. Nonempty JSON responses become resources
-with `properties`, `getRel`, and `rels`, including navigable relative links.
+with `properties`, `getRel`, and `getNamedLink`, including navigable relative links.
 HEAD, HTTP 204/205, and other successful responses with an empty body resolve to
 `undefined`. Method tuples remain unchanged, so a declared response resource
 does not guarantee a body at runtime. Invalid nonempty JSON rejects.
@@ -64,7 +68,9 @@ POST creates a checklist using a request and response inferred from the example
 specification:
 
 ```ts
-const checklist = await client.post(root.rels.create.checklists, {
+const createLink = root.getNamedLink("create", "checklists");
+if (!createLink) throw new Error("Checklist creation unavailable");
+const checklist = await client.post(createLink, {
    title: "My new checklist",
 });
 console.log(checklist.properties.title);
@@ -75,7 +81,9 @@ requiring a full replacement of the checklist's writable `title` and `items`.
 Both the request body and the response resource are inferred:
 
 ```ts
-const replaced = await client.put(checklist.rels.edit.checklist, {
+const editLink = checklist.getNamedLink("edit", "checklist");
+if (!editLink) throw new Error("Checklist editing unavailable");
+const replaced = await client.put(editLink, {
    title: "Weekly checklist",
    items: checklist.properties.items,
 });
@@ -86,28 +94,26 @@ PUT supplies the complete replacement payload required by the API, rather than
 a partial update. Actual payload requirements and link protocols are defined by
 the API's contract.
 
-## Explicitly Typed Relations
+## General Relation Processing
 
-Use explicit `getRel` tuples for caller-known contracts absent from the
-specification. Each tuple specifies a request body and a response resource.
+Use `getRel(rel)` to inspect all links in a relation, including unnamed links.
+The generated interface has one overload accepting a union of known relation
+names for editor suggestions and another accepting any string. Both return
+untyped `Link[]`; absent relations return an empty array.
 
 ```ts
-import type { Checklist } from "../generated/types.js";
-
-const createLink = root
-   .getRel<{ post: [{ title: string }, Checklist] }>("create")
-   .find((link) => link.name === "checklists");
-
-if (createLink) {
-   const checklist = await client.post(createLink, { title: "My new checklist" });
-   console.log(checklist.properties.title);
+for (const link of root.getRel("related")) {
+   console.log(link.name, link.title, link.href);
 }
 ```
 
 `getRel` returns an array of links with optional `name` and `title` properties
-and a readonly `href` string. Client methods absent from the link's contract accept `void` and return
-`Promise<unknown>`. Untyped links, external targets, and `getRel` calls without
-explicit tuples use those same defaults. `HttpClient` exposes only the seven
+and a readonly `href` string. It does not accept caller-supplied type arguments.
+Use `getNamedLink` with a known pair for inferred request and response types.
+Client methods absent from a link's contract accept `void` and return
+`Promise<unknown>`. All `getRel` results, unknown named pairs, and external
+targets without local schemas use those defaults. These methods do not validate
+response data against the specification. `HttpClient` exposes only the seven
 standard methods listed above, even if a link's tuples describe a custom method.
 
 ## Entering Through a Resource URL
@@ -131,14 +137,16 @@ Without a resource type argument, the GET response type is `unknown`.
 
 The checklist example's generated module includes the following declarations
 (the `Root` interface is abbreviated here; the generated interface also includes
-the typed `rels` getter described above):
+the typed `getNamedLink` overloads described above):
 
 ```ts
-import type { ApiRoot, Link, Methods } from "@kewne/restspec";
+import type { ApiRoot, Link } from "@kewne/restspec";
 
 export interface Root {
    properties: { [key: string]: unknown };
-   getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];
+   getRel(rel: "related" | "create"): Link[];
+   getRel(rel: string): Link[];
+   getNamedLink(rel: string, name: string): Link | undefined;
 }
 
 export const root: ApiRoot<Root, { local: string; staging: string; production: string; }, {

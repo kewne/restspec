@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect, onTestFinished, test } from "vitest";
-import { type ApiRoot, createHttpClient, type CredentialsMap, fromHref, fromRoot, type Link, type Methods } from "../src/base-types.js";
+import { type ApiRoot, createHttpClient, createLink, type CredentialsMap, fromHref, fromRoot, type Link } from "../src/base-types.js";
 import { parseHalResource } from "../src/hal.js";
 
 const client = createHttpClient();
@@ -10,20 +10,18 @@ interface TestSubscription {
   properties: {
     status: "ACTIVE" | "INACTIVE";
   };
-  getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];
-  get rels(): Record<string, never>;
+  getRel(rel: string): Link[];
+  getNamedLink(rel: string, name: string): Link | undefined;
 }
 
 interface TestRoot {
   properties: {
     version: string;
   };
-  getRel<METHODS extends Methods>(rel: string): Link<METHODS>[];
-  get rels(): {
-    get related(): {
-      get subscription(): Link<{ get: [void, TestSubscription] }>;
-    };
-  };
+  getRel(rel: "related"): Link[];
+  getRel(rel: string): Link[];
+  getNamedLink(rel: "related", name: "subscription"): Link<{ get: [void, TestSubscription] }> | undefined;
+  getNamedLink(rel: string, name: string): Link | undefined;
 }
 
 async function startTestServer(
@@ -54,7 +52,7 @@ test("fromRoot returns a Link for the selected environment with optional name an
   expect(link).not.toHaveProperty("__methodTypes");
 });
 
-test("client.get fetches HAL resource, populates properties, getRel, and rels, and follows child links", async () => {
+test("client.get fetches HAL resource, populates properties and links, and follows named links", async () => {
   const receivedHeaders: Record<string, string | string[] | undefined>[] = [];
   const baseUrl = await startTestServer((req, res) => {
     receivedHeaders.push(req.headers);
@@ -123,7 +121,13 @@ test("client.get fetches HAL resource, populates properties, getRel, and rels, a
 
   expect(rootResource.getRel("missing")).toEqual([]);
 
-  const subscriptionLink = rootResource.rels.related.subscription;
+  const subscriptionLink = rootResource.getNamedLink("related", "subscription");
+  expect(subscriptionLink).toBe(relatedLinks[0]);
+  expect(rootResource.getNamedLink("missing", "subscription")).toBeUndefined();
+  expect(rootResource.getNamedLink("related", "missing")).toBeUndefined();
+  expect(rootResource.getNamedLink("self", "")).toBeUndefined();
+  expect(rootResource).not.toHaveProperty("rels");
+  if (!subscriptionLink) throw new Error("Missing subscription link");
   expect(subscriptionLink.name).toBe("subscription");
   expect(subscriptionLink.title).toBe("User Subscription");
   expect(subscriptionLink.href).toBe(`${baseUrl}/subscription`);
@@ -150,11 +154,40 @@ test("client.get throws an error on non-OK HTTP responses", async () => {
   );
 });
 
-test("parseHalResource handles non-object payloads", () => {
-  const scalar = parseHalResource<{ properties: string }>("hello", () => {
+test.each(["hello", null, [], 42])("parseHalResource handles non-object payload %j", (body) => {
+  const scalar = parseHalResource<TestSubscription>(body, () => {
     throw new Error("should not create links");
   });
-  expect(scalar.properties).toBe("hello");
+  expect(scalar.properties).toBe(body);
+  expect(scalar.getRel("missing")).toEqual([]);
+  expect(scalar.getNamedLink("missing", "missing")).toBeUndefined();
+  expect(scalar).not.toHaveProperty("rels");
+});
+
+test("named lookup handles duplicate names, invalid links, and prototype-like keys", () => {
+  const resource = parseHalResource<TestRoot>({
+    _links: {
+      related: [
+        { href: "/first", name: "duplicate" },
+        { href: "/second", name: "duplicate" },
+        { href: "/unnamed" },
+        { href: "/prototype", name: "__proto__" },
+        { name: "invalid" },
+        null,
+      ],
+      ["__proto__"]: { href: "/constructor", name: "constructor" },
+      empty: [],
+    },
+  }, createLink);
+  expect(resource.getRel("related")).toHaveLength(4);
+  expect(resource.getNamedLink("related", "duplicate")).toBe(resource.getRel("related")[1]);
+  expect(resource.getNamedLink("related", "__proto__")?.href).toBe("/prototype");
+  expect(resource.getNamedLink("__proto__", "constructor")?.href).toBe("/constructor");
+  expect(resource.getNamedLink("related", "constructor")).toBeUndefined();
+  expect(resource.getNamedLink("constructor", "constructor")).toBeUndefined();
+  expect(resource.getNamedLink("related", "invalid")).toBeUndefined();
+  expect(resource.getNamedLink("empty", "anything")).toBeUndefined();
+  expect(resource.getRel("empty")).toEqual([]);
 });
 
 const standardMethods = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
@@ -304,12 +337,13 @@ test.each([false, true])("non-GET HAL navigation resolves relative links and sco
   });
   const resource = await authenticatedClient.post(fromRoot(apiRoot, "local"));
 
-  const child = resource.rels.related.subscription;
+  const child = resource.getNamedLink("related", "subscription");
+  if (!child) throw new Error("Missing subscription link");
   expect(child.href).toBe(`${baseUrl}/api/child`);
   expect(child.name).toBe("subscription");
   expect(child.title).toBe("User Subscription");
   await authenticatedClient.patch(child);
-  await authenticatedClient.delete(resource.getRel<{ delete: [void, unknown] }>("external")[0]!);
+  await authenticatedClient.delete(resource.getRel("external")[0]!);
   expect(requests).toEqual([
     { method: "POST", authorization: "Bearer root-token", url: "/api/root" },
     { method: "PATCH", authorization: "Bearer root-token", url: "/api/child" },
@@ -379,9 +413,11 @@ test.each([false, true])("HAL navigation scopes credentials to each destination 
   });
   const resource = await authenticatedClient.get(fromRoot(apiRoot, "local"));
 
-  expect(resource.rels.related.subscription.href).toBe(`${baseUrl}/subscription`);
-  await authenticatedClient.get(resource.rels.related.subscription);
-  await authenticatedClient.get(resource.getRel<{ get: [void, unknown] }>("external")[0]!);
+  const subscription = resource.getNamedLink("related", "subscription");
+  if (!subscription) throw new Error("Missing subscription link");
+  expect(subscription.href).toBe(`${baseUrl}/subscription`);
+  await authenticatedClient.get(subscription);
+  await authenticatedClient.get(resource.getRel("external")[0]!);
   expect(requests).toEqual([
     "Bearer root-token",
     "Bearer root-token",
@@ -422,5 +458,5 @@ test("HAL relative links resolve against the final response URL after a redirect
   });
 
   const resource = await client.get(fromHref<TestRoot>(`${baseUrl}/entry`));
-  expect(resource.rels.related.subscription.href).toBe(`${baseUrl}/api/child`);
+  expect(resource.getNamedLink("related", "subscription")?.href).toBe(`${baseUrl}/api/child`);
 });

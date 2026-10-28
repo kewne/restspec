@@ -24,11 +24,10 @@ type RootMetadata = {
   methods: MethodSources;
 };
 
-type Relations = ReadonlyMap<string, readonly {
-  relation: string;
+type Relations = ReadonlyMap<string, ReadonlyMap<string, readonly {
   name: string;
   methods: MethodSources;
-}[]>;
+}[]>>;
 
 class ExportedTypesRenderer extends TypeScriptRenderer {
   private rootName: Name | undefined;
@@ -119,28 +118,24 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
     this.indent(() => {
       const properties = type.getProperties().get("properties")!;
       this.emitLine("properties: ", this.sourceFor(properties.type).source, ";");
-      this.emitLine("getRel<METHODS extends Methods = {}>(rel: string): Link<METHODS>[];");
-      this.emitLine("get rels(): {");
-      this.indent(() => {
-        const groups = new Map<string, Map<string, MethodSources[]>>();
-        for (const entry of this.relations.get(source) ?? []) {
-          const names = groups.get(entry.relation) ?? new Map<string, MethodSources[]>();
-          groups.set(entry.relation, names);
+      const relations = this.relations.get(source);
+      if (relations !== undefined && relations.size > 0) {
+        this.emitLine("getRel(rel: ", [...relations.keys()].map((relation) => JSON.stringify(relation)).join(" | "), "): Link[];");
+      }
+      this.emitLine("getRel(rel: string): Link[];");
+      for (const [relation, entries] of relations ?? []) {
+        const names = new Map<string, MethodSources[]>();
+        for (const entry of entries) {
           const targets = names.get(entry.name) ?? [];
           names.set(entry.name, targets);
           targets.push(entry.methods);
         }
-        for (const [relation, names] of groups) {
-          this.emitLine("get ", JSON.stringify(relation), "(): {");
-          this.indent(() => {
-            for (const [linkName, targets] of names) {
-              this.emitLine("get ", JSON.stringify(linkName), "(): Link<", this.methodsSource(targets), ">;");
-            }
-          });
-          this.emitLine("};");
+        for (const [linkName, targets] of names) {
+          this.emitLine("getNamedLink(rel: ", JSON.stringify(relation), ", name: ", JSON.stringify(linkName),
+            "): Link<", this.methodsSource(targets), "> | undefined;");
         }
-      });
-      this.emitLine("};");
+      }
+      this.emitLine("getNamedLink(rel: string, name: string): Link | undefined;");
     });
     this.emitLine("}");
   }
@@ -166,7 +161,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
   }
 
   protected override emitTypes(): void {
-    this.emitLine('import type { ApiRoot, Link, Methods } from "@kewne/restspec";');
+    this.emitLine('import type { ApiRoot, Link } from "@kewne/restspec";');
     this.ensureBlankLine();
     this.forEachTopLevel("none", (type) => {
       if (type instanceof ObjectType) {

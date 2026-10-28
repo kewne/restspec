@@ -78,7 +78,9 @@ import { root as apiRoot } from "../generated/types.js";
 
 const client = createHttpClient();
 const root = await client.get(fromRoot(apiRoot, "local"));
-const subscription = await client.get(root.rels.related.subscription);
+const subscriptionLink = root.getNamedLink("related", "subscription");
+if (!subscriptionLink) throw new Error("Subscription link unavailable");
+const subscription = await client.get(subscriptionLink);
 console.log(subscription.properties.status);
 ```
 
@@ -86,7 +88,9 @@ POST uses generated, type-safe navigation and request methods. The request body
 and response type are inferred from the target profile's schemas:
 
 ```ts
-const checklist = await client.post(root.rels.create.checklists, {
+const createLink = root.getNamedLink("create", "checklists");
+if (!createLink) throw new Error("Checklist creation unavailable");
+const checklist = await client.post(createLink, {
    title: "My new checklist",
 });
 console.log(checklist.properties.title);
@@ -96,7 +100,9 @@ PUT also uses generated navigation and request methods. The checklist profile's
 named `edit` link accepts a full replacement of its writable `title` and `items`:
 
 ```ts
-const replaced = await client.put(checklist.rels.edit.checklist, {
+const editLink = checklist.getNamedLink("edit", "checklist");
+if (!editLink) throw new Error("Checklist editing unavailable");
+const replaced = await client.put(editLink, {
    title: "Weekly checklist",
    items: checklist.properties.items,
 });
