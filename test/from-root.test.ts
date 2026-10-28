@@ -1,8 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect, onTestFinished, test } from "vitest";
-import { type ApiRoot, type CredentialsMap, fromHref, fromRoot, type Link, type Methods } from "../src/base-types.js";
+import { type ApiRoot, createHttpClient, type CredentialsMap, fromHref, fromRoot, type Link, type Methods } from "../src/base-types.js";
 import { parseHalResource } from "../src/hal.js";
+
+const client = createHttpClient();
 
 interface TestSubscription {
   properties: {
@@ -47,9 +49,12 @@ test("fromRoot returns a Link for the selected environment with optional name an
   expect(link.href).toBe("http://localhost:3000/api");
   expect(link.name).toBeUndefined();
   expect(link.title).toBeUndefined();
+  expect(Object.keys(link)).toEqual(["href"]);
+  expect(link).not.toHaveProperty("request");
+  expect(link).not.toHaveProperty("__methodTypes");
 });
 
-test("fromRoot request.get fetches HAL resource, populates properties, getRel, and rels, and follows child links", async () => {
+test("client.get fetches HAL resource, populates properties, getRel, and rels, and follows child links", async () => {
   const receivedHeaders: Record<string, string | string[] | undefined>[] = [];
   const baseUrl = await startTestServer((req, res) => {
     receivedHeaders.push(req.headers);
@@ -99,7 +104,7 @@ test("fromRoot request.get fetches HAL resource, populates properties, getRel, a
     profile: "https://example.com/profiles/root",
   };
 
-  const rootResource = await fromRoot(apiRoot, "local").request.get();
+  const rootResource = await client.get(fromRoot(apiRoot, "local"));
 
   expect(receivedHeaders[0]?.accept).toBe("application/hal+json, application/json");
   expect(rootResource.properties).toEqual({ version: "1.0.0" });
@@ -123,11 +128,12 @@ test("fromRoot request.get fetches HAL resource, populates properties, getRel, a
   expect(subscriptionLink.title).toBe("User Subscription");
   expect(subscriptionLink.href).toBe(`${baseUrl}/subscription`);
 
-  const subscription = await subscriptionLink.request.get();
+  expect(subscriptionLink).not.toHaveProperty("request");
+  const subscription = await client.get(subscriptionLink);
   expect(subscription.properties).toEqual({ status: "ACTIVE" });
 });
 
-test("fromRoot request.get throws an error on non-OK HTTP responses", async () => {
+test("client.get throws an error on non-OK HTTP responses", async () => {
   const baseUrl = await startTestServer((_req, res) => {
     res.statusCode = 503;
     res.statusMessage = "Service Unavailable";
@@ -139,7 +145,7 @@ test("fromRoot request.get throws an error on non-OK HTTP responses", async () =
     profile: "https://example.com/profiles/root",
   };
 
-  await expect(fromRoot(apiRoot, "local").request.get()).rejects.toThrow(
+  await expect(client.get(fromRoot(apiRoot, "local"))).rejects.toThrow(
     `${baseUrl}/failing: HTTP 503 Service Unavailable`,
   );
 });
@@ -155,7 +161,7 @@ const standardMethods = ["get", "post", "put", "patch", "delete", "head", "optio
 const bodyMethods = ["post", "put", "patch", "delete", "options"] as const;
 type BodyMethods = { [method in typeof bodyMethods[number]]: [unknown, TestRoot] };
 
-test.each(standardMethods)("request.%s sends the verb, credentials, and Accept without an implicit body", async (method) => {
+test.each(standardMethods)("client.%s sends the verb, credentials, and Accept without an implicit body", async (method) => {
   let receivedMethod: string | undefined;
   let receivedHeaders: IncomingMessage["headers"] = {};
   let receivedBody = "";
@@ -167,9 +173,10 @@ test.each(standardMethods)("request.%s sends the verb, credentials, and Accept w
     req.on("end", () => res.end(JSON.stringify({ version: "2.0.0" })));
   });
 
-  const result = await fromHref(baseUrl, {
-    credentials: { type: "bearer", token: "method-token" },
-  }).request[method]();
+  const authenticatedClient = createHttpClient({
+    credentials: { [baseUrl]: { type: "bearer", token: "method-token" } },
+  });
+  const result = await authenticatedClient[method](fromHref(baseUrl));
 
   expect(receivedMethod).toBe(method.toUpperCase());
   expect(receivedHeaders.accept).toBe("application/hal+json, application/json");
@@ -183,7 +190,7 @@ test.each(standardMethods)("request.%s sends the verb, credentials, and Accept w
   }
 });
 
-test.each(bodyMethods)("request.%s serializes supplied JSON payloads", async (method) => {
+test.each(bodyMethods)("client.%s serializes supplied JSON payloads", async (method) => {
   const requests: { body: string; contentType: string | undefined; method: string | undefined }[] = [];
   const baseUrl = await startTestServer((req, res) => {
     let body = "";
@@ -202,7 +209,7 @@ test.each(bodyMethods)("request.%s serializes supplied JSON payloads", async (me
   const payloads = [{ title: "New checklist", items: [] }, false, 0, "", null, undefined];
 
   for (const payload of payloads) {
-    const resource = await link.request[method](payload);
+    const resource = await client[method](link, payload);
     expect(resource.properties).toEqual({ version: "2.0.0" });
   }
 
@@ -213,18 +220,18 @@ test.each(bodyMethods)("request.%s serializes supplied JSON payloads", async (me
   })));
 });
 
-test.each(standardMethods)("request.%s returns undefined for successful empty responses", async (method) => {
+test.each(standardMethods)("client.%s returns undefined for successful empty responses", async (method) => {
   const baseUrl = await startTestServer((req, res) => {
     res.statusCode = Number(req.url!.slice(1));
     res.end();
   });
 
   for (const status of [200, 204, 205]) {
-    await expect(fromHref(`${baseUrl}/${status}`).request[method]()).resolves.toBeUndefined();
+    await expect(client[method](fromHref(`${baseUrl}/${status}`))).resolves.toBeUndefined();
   }
 });
 
-test.each(["get", "head"] as const)("request.%s does not send a body even with an explicit request tuple", async (method) => {
+test.each(["get", "head"] as const)("client.%s does not send a body even with an explicit request tuple", async (method) => {
   let receivedBody = "";
   let contentType: string | undefined;
   const baseUrl = await startTestServer((req, res) => {
@@ -241,34 +248,34 @@ test.each(["get", "head"] as const)("request.%s does not send a body even with a
     profile: "https://example.test/profiles/root",
   };
 
-  await expect(fromRoot(apiRoot, "local").request[method]({ title: "ignored" })).resolves.toBeUndefined();
+  await expect(client[method](fromRoot(apiRoot, "local"), { title: "ignored" })).resolves.toBeUndefined();
   expect(receivedBody).toBe("");
   expect(contentType).toBeUndefined();
 });
 
-test.each(standardMethods)("request.%s rejects HTTP errors before handling an empty body", async (method) => {
+test.each(standardMethods)("client.%s rejects HTTP errors before handling an empty body", async (method) => {
   const baseUrl = await startTestServer((_req, res) => {
     res.statusCode = 503;
     res.statusMessage = "Service Unavailable";
     res.end();
   });
 
-  await expect(fromHref(baseUrl).request[method]()).rejects.toThrow(
+  await expect(client[method](fromHref(baseUrl))).rejects.toThrow(
     `${baseUrl}: HTTP 503 Service Unavailable`,
   );
 });
 
 test.each(["not json", " "])("nonempty invalid JSON %j is not treated as an empty response", async (body) => {
   const baseUrl = await startTestServer((_req, res) => res.end(body));
-  await expect(fromHref(baseUrl).request.post()).rejects.toThrow(SyntaxError);
+  await expect(client.post(fromHref(baseUrl))).rejects.toThrow(SyntaxError);
 });
 
 test("JSON null is parsed as a resource rather than an empty response", async () => {
   const baseUrl = await startTestServer((_req, res) => res.end("null"));
-  await expect(fromHref(baseUrl).request.post()).resolves.toMatchObject({ properties: null });
+  await expect(client.post(fromHref(baseUrl))).resolves.toMatchObject({ properties: null });
 });
 
-test.each([false, true])("non-GET HAL navigation resolves relative links and scopes credentials (map: %s)", async (useMap) => {
+test.each([false, true])("non-GET HAL navigation resolves relative links and scopes credentials (external configured: %s)", async (configureExternal) => {
   const requests: { method: string | undefined; authorization: string | undefined; url: string | undefined }[] = [];
   const externalUrl = await startTestServer((req, res) => {
     requests.push({ method: req.method, authorization: req.headers.authorization, url: req.url });
@@ -289,23 +296,24 @@ test.each([false, true])("non-GET HAL navigation resolves relative links and sco
     profile: "https://example.test/profiles/root",
   };
   const credentials = { type: "bearer", token: "root-token" } as const;
-  const resource = await fromRoot(apiRoot, "local", {
-    credentials: useMap ? {
+  const authenticatedClient = createHttpClient({
+    credentials: {
       [baseUrl]: credentials,
-      [externalUrl]: { type: "bearer", token: "external-token" },
-    } : credentials,
-  }).request.post();
+      ...(configureExternal ? { [externalUrl]: { type: "bearer" as const, token: "external-token" } } : {}),
+    },
+  });
+  const resource = await authenticatedClient.post(fromRoot(apiRoot, "local"));
 
   const child = resource.rels.related.subscription;
   expect(child.href).toBe(`${baseUrl}/api/child`);
   expect(child.name).toBe("subscription");
   expect(child.title).toBe("User Subscription");
-  await child.request.patch();
-  await resource.getRel<{ delete: [void, unknown] }>("external")[0]!.request.delete();
+  await authenticatedClient.patch(child);
+  await authenticatedClient.delete(resource.getRel<{ delete: [void, unknown] }>("external")[0]!);
   expect(requests).toEqual([
     { method: "POST", authorization: "Bearer root-token", url: "/api/root" },
     { method: "PATCH", authorization: "Bearer root-token", url: "/api/child" },
-    { method: "DELETE", authorization: useMap ? "Bearer external-token" : undefined, url: "/" },
+    { method: "DELETE", authorization: configureExternal ? "Bearer external-token" : undefined, url: "/" },
   ]);
 });
 
@@ -318,7 +326,7 @@ test.each([
   ["host precedence", "Bearer host-token"],
   ["unmatched", undefined],
   ["absent", undefined],
-])("fromHref selects credentials by %s", async (match, expected) => {
+])("client selects credentials by %s", async (match, expected) => {
   let authorization: string | undefined;
   const baseUrl = await startTestServer((req, res) => {
     authorization = req.headers.authorization;
@@ -338,11 +346,11 @@ test.each([
     unmatched: { "example.test": originToken },
   };
 
-  await fromHref(baseUrl, { credentials: maps[match] }).request.get();
+  await createHttpClient({ credentials: maps[match] }).get(fromHref(baseUrl));
   expect(authorization).toBe(expected);
 });
 
-test.each([false, true])("HAL navigation scopes credentials to each destination (map: %s)", async (useMap) => {
+test.each([false, true])("HAL navigation scopes credentials to each destination (external configured: %s)", async (configureExternal) => {
   const requests: (string | undefined)[] = [];
   const externalUrl = await startTestServer((req, res) => {
     requests.push(req.headers.authorization);
@@ -363,19 +371,56 @@ test.each([false, true])("HAL navigation scopes credentials to each destination 
     env: { local: `${baseUrl}/root` },
     profile: "https://example.test/profiles/root",
   };
-  const resource = await fromRoot(apiRoot, "local", {
-    credentials: useMap ? {
+  const authenticatedClient = createHttpClient({
+    credentials: {
       [baseUrl]: credentials,
-      [externalUrl]: { type: "bearer", token: "external-token" },
-    } : credentials,
-  }).request.get();
+      ...(configureExternal ? { [externalUrl]: { type: "bearer" as const, token: "external-token" } } : {}),
+    },
+  });
+  const resource = await authenticatedClient.get(fromRoot(apiRoot, "local"));
 
   expect(resource.rels.related.subscription.href).toBe(`${baseUrl}/subscription`);
-  await resource.rels.related.subscription.request.get();
-  await resource.getRel<{ get: [void, unknown] }>("external")[0]!.request.get();
+  await authenticatedClient.get(resource.rels.related.subscription);
+  await authenticatedClient.get(resource.getRel<{ get: [void, unknown] }>("external")[0]!);
   expect(requests).toEqual([
     "Bearer root-token",
     "Bearer root-token",
-    useMap ? "Bearer external-token" : undefined,
+    configureExternal ? "Bearer external-token" : undefined,
   ]);
+});
+
+test("credentials belong to clients rather than links", async () => {
+  const authorizations: (string | undefined)[] = [];
+  const baseUrl = await startTestServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    res.end("{}");
+  });
+  const link = fromHref(baseUrl);
+  const firstClient = createHttpClient({
+    credentials: { [baseUrl]: { type: "bearer", token: "first-token" } },
+  });
+  const secondClient = createHttpClient({
+    credentials: { [baseUrl]: { type: "bearer", token: "second-token" } },
+  });
+
+  await firstClient.get(link);
+  await secondClient.get(link);
+  await client.get(link);
+
+  expect(authorizations).toEqual(["Bearer first-token", "Bearer second-token", undefined]);
+  expect(Object.keys(link)).toEqual(["href"]);
+});
+
+test("HAL relative links resolve against the final response URL after a redirect", async () => {
+  const baseUrl = await startTestServer((req, res) => {
+    if (req.url === "/entry") {
+      res.writeHead(302, { Location: "/api/root" });
+      res.end();
+    } else {
+      res.end(JSON.stringify({ _links: { related: { href: "child", name: "subscription" } } }));
+    }
+  });
+
+  const resource = await client.get(fromHref<TestRoot>(`${baseUrl}/entry`));
+  expect(resource.rels.related.subscription.href).toBe(`${baseUrl}/api/child`);
 });

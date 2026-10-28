@@ -73,11 +73,12 @@ in `src/`. A compatible API server must be running at the selected environment's
 entrypoint URL; type generation does not start a server.
 
 ```ts
-import { fromRoot } from "@kewne/restspec";
+import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root as apiRoot } from "../generated/types.js";
 
-const root = await fromRoot(apiRoot, "local").request.get();
-const subscription = await root.rels.related.subscription.request.get();
+const client = createHttpClient();
+const root = await client.get(fromRoot(apiRoot, "local"));
+const subscription = await client.get(root.rels.related.subscription);
 console.log(subscription.properties.status);
 ```
 
@@ -85,7 +86,7 @@ POST uses generated, type-safe navigation and request methods. The request body
 and response type are inferred from the target profile's schemas:
 
 ```ts
-const checklist = await root.rels.create.checklists.request.post({
+const checklist = await client.post(root.rels.create.checklists, {
    title: "My new checklist",
 });
 console.log(checklist.properties.title);
@@ -95,7 +96,7 @@ PUT also uses generated navigation and request methods. The checklist profile's
 named `edit` link accepts a full replacement of its writable `title` and `items`:
 
 ```ts
-const replaced = await checklist.rels.edit.checklist.request.put({
+const replaced = await client.put(checklist.rels.edit.checklist, {
    title: "Weekly checklist",
    items: checklist.properties.items,
 });

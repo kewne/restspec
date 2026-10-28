@@ -17,18 +17,10 @@ type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'option
 export type BearerCredentials = { type: 'bearer'; token: string }
 export type Credentials = BearerCredentials
 export type CredentialsMap = Readonly<Record<string, Credentials>>
-export type CredentialsConfig = Credentials | CredentialsMap
-export type ClientOptions = { credentials?: CredentialsConfig }
+export type ClientOptions = { credentials?: CredentialsMap }
 
-function isSingleCredentials(credentials: CredentialsConfig): credentials is Credentials {
-    return credentials.type === 'bearer' && typeof credentials.token === 'string'
-}
-
-function normalizeCredentials(href: string, credentials?: CredentialsConfig): CredentialsMap | undefined {
+function normalizeCredentials(credentials?: CredentialsMap): CredentialsMap | undefined {
     if (credentials === undefined) return undefined
-    if (isSingleCredentials(credentials)) {
-        return { [new URL(href).origin]: credentials }
-    }
     return Object.fromEntries(Object.entries(credentials).map(([key, value]) => [
         /^https?:\/\//i.test(key) ? new URL(key).origin : key,
         value,
@@ -48,19 +40,25 @@ export type Link<TYPES extends Methods = {}> = {
     name?: string
     title?: string
     readonly href: string
-    request: {
-        [method in HttpMethod | keyof TYPES]: (reqBody: method extends keyof TYPES ? TYPES[method][0] : void) =>
-            Promise<method extends keyof TYPES ? TYPES[method][1] : unknown>
-    }
+    readonly __methodTypes?: TYPES
 }
 
-export function createLink<RESOURCE = unknown>(
-    href: string,
-    name?: string,
-    title?: string,
-    credentialsMap?: CredentialsMap,
-): Link<{ get: [void, RESOURCE] }> {
-    async function execute(method: HttpMethod, reqBody?: unknown): Promise<unknown> {
+type RequestArguments<BODY> = void extends BODY
+    ? unknown extends BODY ? [reqBody: BODY] : [reqBody?: BODY]
+    : [reqBody: BODY]
+
+export type HttpClient = {
+    [method in HttpMethod]: <TYPES extends Methods>(
+        link: Link<TYPES>,
+        ...args: NoInfer<RequestArguments<method extends keyof TYPES ? TYPES[method][0] : void>>
+    ) => Promise<method extends keyof TYPES ? TYPES[method][1] : unknown>
+}
+
+export function createHttpClient(options?: ClientOptions): HttpClient {
+    const credentialsMap = normalizeCredentials(options?.credentials)
+
+    async function execute(method: HttpMethod, link: Link, reqBody?: unknown): Promise<unknown> {
+        const { href } = link
         const credentials = credentialsForUrl(href, credentialsMap)
         const requestBody = method !== 'get' && method !== 'head' && reqBody !== undefined
             ? JSON.stringify(reqBody) : undefined
@@ -82,31 +80,38 @@ export function createLink<RESOURCE = unknown>(
         if (responseText.length === 0) return undefined
         const body: unknown = JSON.parse(responseText)
         return parseHalResource(body, (childHref, childName, childTitle) =>
-            createLink(new URL(childHref, response.url || href).href, childName, childTitle, credentialsMap))
+            createLink(new URL(childHref, response.url || href).href, childName, childTitle))
     }
 
+    return {
+        get: (link: Link, reqBody?: unknown) => execute('get', link, reqBody),
+        post: (link: Link, reqBody?: unknown) => execute('post', link, reqBody),
+        put: (link: Link, reqBody?: unknown) => execute('put', link, reqBody),
+        patch: (link: Link, reqBody?: unknown) => execute('patch', link, reqBody),
+        delete: (link: Link, reqBody?: unknown) => execute('delete', link, reqBody),
+        head: (link: Link, reqBody?: unknown) => execute('head', link, reqBody),
+        options: (link: Link, reqBody?: unknown) => execute('options', link, reqBody),
+    } as HttpClient
+}
+
+export function createLink<RESOURCE = unknown>(
+    href: string,
+    name?: string,
+    title?: string,
+): Link<{ get: [void, RESOURCE] }> {
     return {
         ...(name !== undefined ? { name } : {}),
         ...(title !== undefined ? { title } : {}),
         get href() {
             return href
         },
-        request: {
-            get: () => execute('get'),
-            post: (reqBody?: unknown) => execute('post', reqBody),
-            put: (reqBody?: unknown) => execute('put', reqBody),
-            patch: (reqBody?: unknown) => execute('patch', reqBody),
-            delete: (reqBody?: unknown) => execute('delete', reqBody),
-            head: () => execute('head'),
-            options: (reqBody?: unknown) => execute('options', reqBody),
-        } as Link<{ get: [void, RESOURCE] }>["request"],
     }
 }
 
-export function fromRoot<RESOURCE, ENV extends Record<string, string>, ROOT_METHODS extends Methods = { get: [void, RESOURCE] }>(root: ApiRoot<RESOURCE, ENV, ROOT_METHODS>, env: keyof ENV & string, options?: ClientOptions): Link<ROOT_METHODS> {
-    return fromHref<RESOURCE>(root.env[env]!, options) as unknown as Link<ROOT_METHODS>
+export function fromRoot<RESOURCE, ENV extends Record<string, string>, ROOT_METHODS extends Methods = { get: [void, RESOURCE] }>(root: ApiRoot<RESOURCE, ENV, ROOT_METHODS>, env: keyof ENV & string): Link<ROOT_METHODS> {
+    return fromHref<RESOURCE>(root.env[env]!) as unknown as Link<ROOT_METHODS>
 }
 
-export function fromHref<RESOURCE = unknown>(href: string, options?: ClientOptions): Link<{ get: [void, RESOURCE] }> {
-    return createLink<RESOURCE>(href, undefined, undefined, normalizeCredentials(href, options?.credentials))
+export function fromHref<RESOURCE = unknown>(href: string): Link<{ get: [void, RESOURCE] }> {
+    return createLink<RESOURCE>(href)
 }

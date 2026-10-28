@@ -108,26 +108,29 @@ test("infers plain request payloads and response resources for every method and 
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types).toContain("export type CreateRequest = {");
-  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";
 import type { CreateRequest, Payload } from "./generated/types.js";
+const client = createHttpClient();
 const body: CreateRequest = { title: "new" };
 const link = fromRoot(root, "staging");
 ${["get", "post", "put", "patch", "delete", "head", "options"].map((method) => `
-export const ${method}Result: Promise<Payload> = link.request.${method}(body);
+export const ${method}Result: Promise<Payload> = client.${method}(link, body);
 // @ts-expect-error Request schemas require a body.
-link.request.${method}();
+client.${method}(link);
 // @ts-expect-error Request payloads are not resource wrappers.
-link.request.${method}({ properties: body });
+client.${method}(link, { properties: body });
 // @ts-expect-error Incorrect request property types are rejected.
-link.request.${method}({ title: 123 });
+client.${method}(link, { title: 123 });
 declare const resource${method}: Payload;
-export const named${method}: Promise<Payload> = resource${method}.rels.related.self.request.${method}(body);
+export const named${method}: Promise<Payload> = client.${method}(resource${method}.rels.related.self, body);
 `).join("\n")}
 declare const resource: Payload;
-export const external: Promise<unknown> = resource.rels.related.external.request.post();
+export const external: Promise<unknown> = client.post(resource.rels.related.external);
 // @ts-expect-error External targets have no request schema.
-resource.rels.related.external.request.post(body);
+client.post(resource.rels.related.external, body);
+// @ts-expect-error Links no longer execute requests.
+link.request;
 `);
 });
 
@@ -138,23 +141,24 @@ test.each([undefined, {}, { "application/json": {} }, { "application/json": { po
     success(project.generate());
     const types = await readFile(project.output, "utf8");
     expect(types).not.toContain("RestspecEmpty");
-    await compileConsumer(project, `import { fromRoot, fromHref } from "@kewne/restspec";
+    await compileConsumer(project, `import { createHttpClient, fromRoot, fromHref } from "@kewne/restspec";
 import type { Link } from "@kewne/restspec";
 import { root } from "./generated/types.js";
+  const client = createHttpClient();
 const link = fromRoot(root, "staging");
-export const response: Promise<unknown> = link.request.get();
-export const post: Promise<unknown> = link.request.post();
+  export const response: Promise<unknown> = client.get(link);
+  export const post: Promise<unknown> = client.post(link);
 // @ts-expect-error Missing request schemas forbid bodies.
-link.request.post({ title: "new" });
+  client.post(link, { title: "new" });
 // @ts-expect-error Missing response schemas do not promise a concrete result.
-export const incorrect: Promise<string> = link.request.get();
+  export const incorrect: Promise<string> = client.get(link);
 declare const untyped: Link;
-export const untypedResult: Promise<unknown> = untyped.request.post();
+  export const untypedResult: Promise<unknown> = client.post(untyped);
 // @ts-expect-error Untyped requests default to void too.
-untyped.request.post("body");
+  client.post(untyped, "body");
 const bookmark = fromHref("https://example.test/");
 // @ts-expect-error Unspecified bookmark methods default to void.
-bookmark.request.patch({});
+  client.patch(bookmark, {});
 `);
   },
 );
@@ -190,20 +194,21 @@ test("shares schemas across body roles and independently defaults missing body s
   success(project.generate());
   const types = await readFile(project.output, "utf8");
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
-  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";
 import type { Payload, Updated } from "./generated/types.js";
+const client = createHttpClient();
 const link = fromRoot(root, "staging");
-export const post: Promise<unknown> = link.request.post({ id: "new" });
-export const patch: Promise<Updated> = link.request.patch();
+export const post: Promise<unknown> = client.post(link, { id: "new" });
+export const patch: Promise<Updated> = client.patch(link);
 // @ts-expect-error An absent response schema cannot imply Payload.
-export const wrongResponse: Promise<Payload> = link.request.post({ id: "new" });
+export const wrongResponse: Promise<Payload> = client.post(link, { id: "new" });
 // @ts-expect-error An absent request schema forbids a body.
-link.request.patch({ id: "new" });
+client.patch(link, { id: "new" });
 declare const updated: Updated;
-export const named: Promise<Payload> = updated.rels.related.self.request.get();
+export const named: Promise<Payload> = client.get(updated.rels.related.self);
 // @ts-expect-error Request slots sharing a response schema still require plain payloads.
-link.request.post({ properties: { id: "new" } });
+client.post(link, { properties: { id: "new" } });
 `);
 });
 
@@ -231,24 +236,25 @@ test("renders request-only scalar, array, recursive and unconstrained payloads w
   await project.put("schemas/any.json", "true");
   await project.put("schemas/collision.json", JSON.stringify({ title: "node-request", type: "boolean" }));
   success(project.generate());
-  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";
+const client = createHttpClient();
 const link = fromRoot(root, "staging");
-link.request.post({ value: "parent", children: [{ value: "child", children: [] }] });
-link.request.put("label");
-link.request.patch([1, 2]);
-link.request.delete({ arbitrary: true });
-link.request.options(true);
+client.post(link, { value: "parent", children: [{ value: "child", children: [] }] });
+client.put(link, "label");
+client.patch(link, [1, 2]);
+client.delete(link, { arbitrary: true });
+client.options(link, true);
 export async function readRoot(): Promise<string> {
-  const resource = await link.request.get();
+  const resource = await client.get(link);
   return resource.properties.id;
 }
 // @ts-expect-error Recursive payload fields preserve their types.
-link.request.post({ value: "parent", children: [{ value: 123, children: [] }] });
+client.post(link, { value: "parent", children: [{ value: 123, children: [] }] });
 // @ts-expect-error Scalar request types are enforced.
-link.request.put(123);
+client.put(link, 123);
 // @ts-expect-error Array request element types are enforced.
-link.request.patch(["wrong"]);
+client.patch(link, ["wrong"]);
 `);
 });
 
@@ -269,18 +275,20 @@ test("unions duplicate named link targets independently for each method", async 
   });
   await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
   success(project.generate());
-  await compileConsumer(project, `import type { Payload, Child } from "./generated/types.js";
+  await compileConsumer(project, `import { createHttpClient } from "@kewne/restspec";
+import type { Payload, Child } from "./generated/types.js";
+const client = createHttpClient();
 declare const resource: Payload;
 const target = resource.rels.related.target;
-export const response: Promise<Payload | Child> = target.request.get();
-export const body: Promise<unknown> = target.request.post("new");
-export const absentBody: Promise<unknown> = target.request.post();
+export const response: Promise<Payload | Child> = client.get(target);
+export const body: Promise<unknown> = client.post(target, "new");
+export const absentBody: Promise<unknown> = client.post(target);
 // @ts-expect-error Either target can be returned.
-export const wrong: Promise<Payload> = target.request.get();
+export const wrong: Promise<Payload> = client.get(target);
 // @ts-expect-error One target has no POST response schema.
-export const wrongPost: Promise<Child> = target.request.post("new");
+export const wrongPost: Promise<Child> = client.post(target, "new");
 // @ts-expect-error Neither target accepts a numeric POST body.
-target.request.post(123);
+client.post(target, 123);
 `);
 });
 
@@ -355,15 +363,17 @@ test("getRel uses caller-supplied Methods and returns typed Link arrays", async 
   const types = await readFile(project.output, "utf8");
   expect(types.match(/getRel<METHODS extends Methods = {}>\(rel: string\): Link<METHODS>\[\];/g)).toHaveLength(2);
   expect(types).toContain("get rels(): {");
-  const consumer = await project.put("consumer.ts", `import type { Link, Methods } from "@kewne/restspec";
+  const consumer = await project.put("consumer.ts", `import { createHttpClient } from "@kewne/restspec";
+import type { HttpClient, Link, Methods } from "@kewne/restspec";
 import type { Payload, Child } from "./generated/types.js";
+const client: HttpClient = createHttpClient();
 declare const resource: Payload;
 export const properties: string = resource.properties.id;
-export const namedChild: Promise<Child> = resource.rels.related.child.request.get();
-export const namedParent: Promise<Payload> = ({} as Child).rels.related.parent.request.get();
-export const namedExternal: Promise<unknown> = resource.rels.related.external.request.get();
-export const namedCustom: Promise<Payload> = resource.rels["urn:custom"].self.request.get();
-export const namedCreate: Promise<unknown> = resource.rels["create-from"].child.request.post();
+export const namedChild: Promise<Child> = client.get(resource.rels.related.child);
+export const namedParent: Promise<Payload> = client.get(({} as Child).rels.related.parent);
+export const namedExternal: Promise<unknown> = client.get(resource.rels.related.external);
+export const namedCustom: Promise<Payload> = client.get(resource.rels["urn:custom"].self);
+export const namedCreate: Promise<unknown> = client.post(resource.rels["create-from"].child);
 // @ts-expect-error Unknown link names are not exposed.
 resource.rels.related.missing;
 // @ts-expect-error Unknown relations are not exposed.
@@ -373,25 +383,30 @@ resource.rels.related.child = resource.rels.related.child;
 // @ts-expect-error The relationship index is a getter.
 resource.rels = resource.rels;
 // @ts-expect-error Local target response types are preserved.
-const incorrectTarget: Promise<Payload> = resource.rels.related.child.request.get();
+const incorrectTarget: Promise<Payload> = client.get(resource.rels.related.child);
 type CreateMethods = { post: [{ label: string }, Child] };
 export const links: Link<CreateMethods>[] = resource.getRel<CreateMethods>("create-from");
 export const name: string | undefined = links[0].name;
 export const title: string | undefined = links[0].title;
-export const created: Promise<Child> = links[0].request.post({ label: "child" });
-export const parent: Promise<Payload> = ({} as Child).getRel<{ get: [void, Payload] }>("related")[0].request.get();
+export const created: Promise<Child> = client.post(links[0], { label: "child" });
+export const parent: Promise<Payload> = client.get(({} as Child).getRel<{ get: [void, Payload] }>("related")[0]);
 export const custom: Link<Methods>[] = resource.getRel<Methods>("urn:custom");
 export const unspecified: Link[] = resource.getRel("not-in-the-spec");
 declare const defaults: Link;
-export const defaultGet: Promise<unknown> = defaults.request.get();
-export const defaultPost: Promise<unknown> = defaults.request.post();
-export const defaultPut: Promise<unknown> = links[0].request.put();
-export const defaultPatch: Promise<unknown> = defaults.request.patch();
-export const defaultDelete: Promise<unknown> = defaults.request.delete(undefined);
-export const defaultHead: Promise<unknown> = unspecified[0].request.head(undefined);
-export const defaultOptions: Promise<unknown> = defaults.request.options();
+export const defaultGet: Promise<unknown> = client.get(defaults);
+export const defaultPost: Promise<unknown> = client.post(defaults);
+export const defaultPut: Promise<unknown> = client.put(links[0]);
+export const defaultPatch: Promise<unknown> = client.patch(defaults);
+export const defaultDelete: Promise<unknown> = client.delete(defaults, undefined);
+export const defaultHead: Promise<unknown> = client.head(unspecified[0], undefined);
+export const defaultOptions: Promise<unknown> = client.options(defaults);
 declare const customMethod: Link<{ search: [{ query: string }, Child] }>;
-export const searched: Promise<Child> = customMethod.request.search({ query: "child" });
+// @ts-expect-error Only the seven standard HTTP methods are implemented.
+client.search(customMethod, { query: "child" });
+declare const unknownBody: Link<{ post: [unknown, Child] }>;
+export const arbitraryBody: Promise<Child> = client.post(unknownBody, { arbitrary: true });
+// @ts-expect-error An explicit unknown body slot still requires an argument.
+client.post(unknownBody);
 `);
   const compiled = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
@@ -399,20 +414,21 @@ export const searched: Promise<Child> = customMethod.request.search({ query: "ch
   ], { encoding: "utf8" });
   expect(compiled.error).toBeUndefined();
   expect(compiled.status, compiled.stdout + compiled.stderr).toBe(0);
-  await project.put("consumer.ts", `import type { Link } from "@kewne/restspec";
+  await project.put("consumer.ts", `import { createHttpClient } from "@kewne/restspec";
+import type { Link } from "@kewne/restspec";
 import type { Payload } from "./generated/types.js";
+const client = createHttpClient();
 declare const resource: Payload;
 resource.getRel<{ get: string }>("related");
-declare const request: Link<{ get: [void, string] }>["request"];
-const missingMetadata: Link<{ get: [void, string] }> = { request };
+const missingMetadata: Link<{ get: [void, string] }> = {};
 declare const link: Link<{ get: [void, string] }>;
 link.get();
-link.request.get("invalid body");
+client.get(link, "invalid body");
 declare const defaults: Link;
-const wrongDefault: Promise<string> = defaults.request.get();
-const wrongInferredDefault: Promise<string> = resource.getRel("related")[0].request.post();
-const wrongBody: string = {} as Parameters<typeof defaults.request.post>[0];
-resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.post({ label: 123 });
+const wrongDefault: Promise<string> = client.get(defaults);
+const wrongInferredDefault: Promise<string> = client.post(resource.getRel("related")[0]);
+const wrongBody: string = {} as Parameters<typeof client.post<{}>>[1];
+client.post(resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0], { label: 123 });
 `);
   const invalid = spawnSync(process.execPath, [
     join(root, "node_modules/typescript/bin/tsc"),
@@ -423,7 +439,7 @@ resource.getRel<{ post: [{ label: string }, Payload] }>("create")[0].request.pos
   expect(invalid.stdout).toContain("does not satisfy the constraint 'Methods'");
   expect(invalid.stdout).toContain("href");
   expect(invalid.stdout).toContain("Property 'get' does not exist");
-  expect(invalid.stdout).toContain("Argument of type 'string' is not assignable to parameter of type 'void'");
+  expect(invalid.stdout).toContain("Type 'string' is not assignable to type 'void'");
   expect(invalid.stdout).toContain("Type 'Promise<unknown>' is not assignable to type 'Promise<string>'");
   expect(invalid.stdout).toContain("Type 'void | undefined' is not assignable to type 'string'");
   expect(invalid.stdout).toContain("Type 'number' is not assignable to type 'string'");
@@ -572,32 +588,33 @@ test("root export resolves ApiRoot from the packed package", async () => {
   ], { encoding: "utf8" });
   success(extracted);
   await project.put("package.json", { type: "module" });
-  const consumer = await project.put("consumer.ts", `import { fromHref, fromRoot } from "@kewne/restspec";
-import type { ApiRoot, Link } from "@kewne/restspec";
+  const consumer = await project.put("consumer.ts", `import { createHttpClient, fromHref, fromRoot } from "@kewne/restspec";
+import type { ApiRoot, HttpClient, Link } from "@kewne/restspec";
 import { root } from "./generated/types.js";
 import type { Payload } from "./generated/types.js";
+const client: HttpClient = createHttpClient();
 export const entry: ApiRoot<Payload, { staging: string; production: string }> = root;
 export const genericEntry: ApiRoot<Payload> = root;
 const inferred = fromRoot(root, "staging");
 export const productionLink: Link<{ get: [void, Payload] }> = fromRoot(root, "production");
-export const authenticatedRoot: Link<{ get: [void, Payload] }> = fromRoot(root, "staging", {
-  credentials: { type: "bearer", token: "example-token" },
-});
-export const mappedRoot = fromRoot(root, "staging", {
+export const authenticatedClient: HttpClient = createHttpClient({
   credentials: { "https://example.test": { type: "bearer", token: "example-token" } },
 });
-export const authenticatedBookmark: Link<{ get: [void, Payload] }> = fromHref<Payload>(root.env.staging, {
-  credentials: { type: "bearer", token: "example-token" },
-});
-export const mappedBookmark = fromHref(root.env.staging, {
+export const mappedClient = createHttpClient({
   credentials: { "example.test": { type: "bearer", token: "example-token" } },
 });
 // @ts-expect-error Bearer credentials require a token.
-fromRoot(root, "staging", { credentials: { type: "bearer" } });
+createHttpClient({ credentials: { "example.test": { type: "bearer" } } });
 // @ts-expect-error Credential tokens must be strings.
-fromHref(root.env.staging, { credentials: { "example.test": { type: "bearer", token: 123 } } });
+createHttpClient({ credentials: { "example.test": { type: "bearer", token: 123 } } });
 // @ts-expect-error Unsupported credential schemes are rejected.
-fromHref(root.env.staging, { credentials: { type: "basic", token: "example-token" } });
+createHttpClient({ credentials: { "example.test": { type: "basic", token: "example-token" } } });
+// @ts-expect-error Single-token shorthand is no longer supported.
+createHttpClient({ credentials: { type: "bearer", token: "example-token" } });
+// @ts-expect-error Credentials belong to the client, not root links.
+fromRoot(root, "staging", { credentials: {} });
+// @ts-expect-error Credentials belong to the client, not bookmark links.
+fromHref(root.env.staging, { credentials: {} });
 // @ts-expect-error Environment argument is required.
 fromRoot(root);
 // @ts-expect-error Only defined environment keys are accepted.
@@ -612,9 +629,9 @@ export const title: string | undefined = inferred.title;
 export const href: string = inferred.href;
 // @ts-expect-error Link href is read-only.
 inferred.href = "https://api.example.com/other";
-export const result: Promise<Payload> = inferred.request.get();
+export const result: Promise<Payload> = client.get(inferred);
 export async function readRoot(): Promise<Payload> {
-  const resource = await inferred.request.get();
+  const resource = await client.get(inferred);
   const id: string = resource.properties.id;
   return resource;
 }
@@ -625,20 +642,20 @@ export const bookmarkLink: Link<{ get: [void, Payload] }> = bookmarked;
 export const bookmarkName: string | undefined = bookmarked.name;
 export const bookmarkTitle: string | undefined = bookmarked.title;
 export const bookmarkHref: string = bookmarked.href;
-export const bookmarkResult: Promise<Payload> = bookmarked.request.get();
+export const bookmarkResult: Promise<Payload> = client.get(bookmarked);
 export async function readBookmark(): Promise<Payload> {
-  const resource = await bookmarked.request.get();
+  const resource = await client.get(bookmarked);
   const id: string = resource.properties.id;
   return resource;
 }
 // @ts-expect-error Bookmarks must be strings.
 fromHref<Payload>(123);
 // @ts-expect-error GET returns the specified resource type.
-export const invalidBookmarkResult: Promise<string> = bookmarked.request.get();
+export const invalidBookmarkResult: Promise<string> = client.get(bookmarked);
 const untypedBookmark = fromHref("https://api.example.com/resources/123");
-export const unknownBookmarkResult: Promise<unknown> = untypedBookmark.request.get();
+export const unknownBookmarkResult: Promise<unknown> = client.get(untypedBookmark);
 // @ts-expect-error An omitted resource type cannot imply Payload.
-export const invalidUntypedBookmarkResult: Promise<Payload> = untypedBookmark.request.get();
+export const invalidUntypedBookmarkResult: Promise<Payload> = client.get(untypedBookmark);
 `);
   for (const [module, resolution] of [["NodeNext", "NodeNext"], ["ES2022", "node"]]) {
     const compiled = spawnSync(process.execPath, [
@@ -680,10 +697,11 @@ test("generates all example types as deterministic, strict-compilable exports", 
   expect(await readFile(output, "utf8")).toBe(types);
 
   const consumer = join(directory, "consumer.ts");
-  await writeFile(consumer, `import { fromRoot } from "@kewne/restspec";
+  await writeFile(consumer, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import type { ApiRoot } from "@kewne/restspec";
 import { root } from "./types.js";
 import type { Root, Checklist, ChecklistInstance, Subscription } from "./types.js";
+const client = createHttpClient();
 export const entry: ApiRoot<Root, { local: string; staging: string; production: string }> = root;
 export const localUrl: string = root.env.local;
 export const stagingUrl: string = root.env.staging;
@@ -696,18 +714,18 @@ declare const resource: Root;
 export const related = resource.getRel<{ get: [void, Subscription] }>("related");
 export const created = resource.getRel<{ post: [unknown, Checklist] }>("create");
 export async function typeSafeAccess() {
-  const resource = await fromRoot(root, "local").request.get();
-  const created: Checklist = await resource.rels.create.checklists.request.post({ title: "My New Checklist" });
+  const resource = await client.get(fromRoot(root, "local"));
+  const created: Checklist = await client.post(resource.rels.create.checklists, { title: "My New Checklist" });
   // @ts-expect-error Checklist creation requires a title.
-  resource.rels.create.checklists.request.post({});
+  client.post(resource.rels.create.checklists, {});
   // @ts-expect-error Checklist titles must be strings.
-  resource.rels.create.checklists.request.post({ title: 123 });
+  client.post(resource.rels.create.checklists, { title: 123 });
   // @ts-expect-error Checklist creation requires a request body.
-  resource.rels.create.checklists.request.post();
+  client.post(resource.rels.create.checklists);
   // @ts-expect-error The list profile only defines POST, not a GET response.
-  const invalidGet: Promise<Checklist> = resource.rels.create.checklists.request.get();
-  const subscription: Subscription = await resource.rels.related.subscription.request.get();
-  const instance: ChecklistInstance = await created.rels["create-from"].instance.request.get();
+  const invalidGet: Promise<Checklist> = client.get(resource.rels.create.checklists);
+  const subscription: Subscription = await client.get(resource.rels.related.subscription);
+  const instance: ChecklistInstance = await client.get(created.rels["create-from"].instance);
   return { created, subscription, instance };
 }
 `);
@@ -1089,12 +1107,13 @@ test("dereferences https: URLs for entrypoint, profiles, and schemas in config",
   expect(types).toContain("export interface MappedResource");
   expect(types).toContain('get "mapped"(): Link<{ get: [void, MappedResource];');
   expect(types).toContain("export const root: ApiRoot<RemoteRoot, { production: string; },");
-  await compileConsumer(project, `import { fromRoot } from "@kewne/restspec";
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";
+const client = createHttpClient();
 const link = fromRoot(root, "production");
-export const created: Promise<unknown> = link.request.post({ value: "new" });
+export const created: Promise<unknown> = client.post(link, { value: "new" });
 // @ts-expect-error Remote request schema references preserve payload types.
-link.request.post({ value: 123 });
+client.post(link, { value: 123 });
 `);
 });
 

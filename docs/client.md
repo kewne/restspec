@@ -10,11 +10,12 @@ and resource types from your application.
 `fromRoot` accepts `root` along with one of its defined environment keys:
 
 ```ts
-import { fromRoot } from "@kewne/restspec";
+import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root as apiRoot } from "../generated/types.js";
 
-const root = await fromRoot(apiRoot, "local").request.get();
-const subscription = await root.rels.related.subscription.request.get();
+const client = createHttpClient();
+const root = await client.get(fromRoot(apiRoot, "local"));
+const subscription = await client.get(root.rels.related.subscription);
 ```
 
 Example imports assume the application module is in `src/`, with generated
@@ -25,7 +26,7 @@ Resources expose a read-only `rels` getter, grouped by relation type and known
 link name. Named links infer each method's request payload and response resource
 from the target profile's JSON schemas. The checklist example declares GET
 response schemas and a checklist POST request with a required string `title`.
-Its `root.rels.create.checklists.request.post({ title: "New checklist" })`
+Its `client.post(root.rels.create.checklists, { title: "New checklist" })`
 contract infers a checklist response resource.
 
 Relation types and names containing punctuation use bracket access, such as
@@ -34,8 +35,15 @@ only through `getRel`.
 
 ## HTTP Requests
 
-Links execute GET, POST, PUT, PATCH, DELETE, HEAD, and OPTIONS requests through
-the corresponding lowercase `request` methods. POST, PUT, PATCH, DELETE, and
+`createHttpClient(options?)` returns an `HttpClient` with lowercase `get`, `post`,
+`put`, `patch`, `delete`, `head`, and `options` methods. Each method takes a link
+as its first argument and the request body as its second, returning a promise
+of the response resource. Request and response types are inferred from the link;
+one client can follow links with different contracts. Required request schemas
+require a body, while `void` request bodies can be omitted.
+
+Links contain only `href` and optional `name` and `title` metadata at runtime.
+POST, PUT, PATCH, DELETE, and
 OPTIONS serialize supplied payloads as JSON and send `Content-Type: application/json`.
 An `undefined` payload omits both the body and its content type. GET and HEAD
 never send request bodies, even when a schema or explicit tuple declares one.
@@ -56,7 +64,7 @@ POST creates a checklist using a request and response inferred from the example
 specification:
 
 ```ts
-const checklist = await root.rels.create.checklists.request.post({
+const checklist = await client.post(root.rels.create.checklists, {
    title: "My new checklist",
 });
 console.log(checklist.properties.title);
@@ -67,7 +75,7 @@ requiring a full replacement of the checklist's writable `title` and `items`.
 Both the request body and the response resource are inferred:
 
 ```ts
-const replaced = await checklist.rels.edit.checklist.request.put({
+const replaced = await client.put(checklist.rels.edit.checklist, {
    title: "Weekly checklist",
    items: checklist.properties.items,
 });
@@ -91,17 +99,16 @@ const createLink = root
    .find((link) => link.name === "checklists");
 
 if (createLink) {
-   const checklist = await createLink.request.post({ title: "My new checklist" });
+   const checklist = await client.post(createLink, { title: "My new checklist" });
    console.log(checklist.properties.title);
 }
 ```
 
-`getRel` returns an array of links with `name`, `title`, a readonly `href` string,
-and `request` properties. Other common HTTP methods accept `void` and return
+`getRel` returns an array of links with optional `name` and `title` properties
+and a readonly `href` string. Client methods absent from the link's contract accept `void` and return
 `Promise<unknown>`. Untyped links, external targets, and `getRel` calls without
-explicit tuples use those same defaults. Custom methods remain available
-as type contracts through explicit `getRel` tuples, but only the seven standard
-methods listed above are implemented at runtime.
+explicit tuples use those same defaults. `HttpClient` exposes only the seven
+standard methods listed above, even if a link's tuples describe a custom method.
 
 ## Entering Through a Resource URL
 
@@ -109,11 +116,12 @@ To enter the API through an existing resource URL instead of its root, use
 `fromHref` with the expected resource type:
 
 ```ts
-import { fromHref } from "@kewne/restspec";
+import { createHttpClient, fromHref } from "@kewne/restspec";
 import type { Checklist } from "../generated/types.js";
 
+const client = createHttpClient();
 const bookmarkLink = fromHref<Checklist>("https://api.example.com/checklists/123");
-const checklist = await bookmarkLink.request.get();
+const checklist = await client.get(bookmarkLink);
 ```
 
 The resource type is supplied by the caller; it does not validate the response.
@@ -159,20 +167,22 @@ root-profile method tuples in the returned link. Existing
 
 ## Credentials
 
-Both `fromRoot(root, env, options)` and `fromHref(href, options)` accept bearer
-credentials. A single token is scoped to the entrypoint's origin, including
-its scheme and port, and is reused for same-origin discovered links:
+Credentials are configured on the client, not on links. Supply a destination-keyed
+map to scope bearer tokens to the intended origins, hosts, or hostnames:
 
 ```ts
-const rootLink = fromRoot(apiRoot, "production", {
-   credentials: { type: "bearer", token: accessToken },
+const client = createHttpClient({
+   credentials: {
+      [new URL(apiRoot.env.production).origin]: { type: "bearer", token: accessToken },
+   },
 });
+const root = await client.get(fromRoot(apiRoot, "production"));
 ```
 
 For APIs spanning multiple domains, supply a credentials map:
 
 ```ts
-const rootLink = fromRoot(apiRoot, "production", {
+const client = createHttpClient({
    credentials: {
       "https://api.example.com": { type: "bearer", token: apiToken },
       "files.example.com": { type: "bearer", token: filesToken },
@@ -180,11 +190,24 @@ const rootLink = fromRoot(apiRoot, "production", {
 });
 ```
 
-Each link selects credentials by exact origin, then host (including port), then
+The client selects credentials by exact origin, then host (including port), then
 hostname. URL keys are normalized to their origin. Hostname keys apply across
 schemes and ports; prefer HTTPS origin keys for narrowly scoped credentials.
-Discovered links retain the configuration but send `Authorization: Bearer ...`
-only when their destination matches. Unconfigured destinations receive no
+Requests to discovered links send `Authorization: Bearer ...` only when their
+destination matches the client's configuration. Unconfigured destinations receive no
 authorization header. No wildcard or subdomain matching is performed.
+
+The same link can be used by multiple clients with different credentials;
+links do not retain credentials or a reference to their originating client.
+
+## Migrating From Link Requests
+
+Replace `link.request.get()` with `client.get(link)` and
+`link.request.post(body)` with `client.post(link, body)`. The `request` property
+has been removed; there is no compatibility wrapper.
+
+Move credential options from `fromRoot` and `fromHref` to `createHttpClient`.
+The single-token shorthand is no longer accepted. Use a map keyed by the
+entrypoint's origin, as shown above, to preserve its previous origin scope.
 
 [Return to the overview](../README.md).
