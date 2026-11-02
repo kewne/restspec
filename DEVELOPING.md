@@ -25,8 +25,11 @@ routine installs should use `--frozen-lockfile`.
 Generate types for the checklist example using the built CLI:
 
 ```sh
-node dist/cli.js generate-types examples/checklist-api/restspec.yml --profiles examples/checklist-api/profiles --out generated/types.ts
+node dist/cli.js generate-types --config examples/checklist-api/restspec.config.yml --out generated/types.ts
 ```
+
+The example's `restspec.config.yml` fetches the root profile over HTTPS and maps
+the remaining profile URLs to local files. Generation requires network access.
 
 Run tests and build a package archive:
 

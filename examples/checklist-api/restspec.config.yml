@@ -1,0 +1,13 @@
+entrypoint: ./restspec.yml
+profiles:
+  - https://api.checklists.keeoon.dev/profiles/root
+  - url: https://checklists.keeoon.dev/profiles/checklist
+    location: ./profiles/checklist.yml
+  - url: https://checklists.keeoon.dev/profiles/checklist-list
+    location: ./profiles/checklist-list.yml
+  - url: https://checklists.keeoon.dev/profiles/checklist-instance
+    location: ./profiles/checklist-instance.yml
+  - url: https://checklists.keeoon.dev/profiles/instance-list
+    location: ./profiles/instance-list.yml
+  - url: https://checklists.keeoon.dev/profiles/subscription
+    location: ./profiles/subscription.yml
