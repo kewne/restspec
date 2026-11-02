@@ -110,12 +110,13 @@ test("infers plain request payloads and response resources for every method and 
   expect(types).toContain("export type CreateRequest = {");
   await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
 import { root } from "./generated/types.js";
+import type { Response } from "@kewne/restspec";
 import type { CreateRequest, Payload } from "./generated/types.js";
 const client = createHttpClient();
 const body: CreateRequest = { title: "new" };
 const link = fromRoot(root, "staging");
 ${["get", "post", "put", "patch", "delete", "head", "options"].map((method) => `
-export const ${method}Result: Promise<Payload> = client.${method}(link, body);
+export const ${method}Result: Promise<${method === "head" ? "Response | undefined" : "Payload"}> = client.${method}(link, body);
 // @ts-expect-error Request schemas require a body.
 client.${method}(link);
 // @ts-expect-error Request payloads are not resource wrappers.
@@ -123,7 +124,7 @@ client.${method}(link, { properties: body });
 // @ts-expect-error Incorrect request property types are rejected.
 client.${method}(link, { title: 123 });
 declare const resource${method}: Payload;
-export const named${method}: Promise<Payload> = client.${method}(resource${method}.getNamedLink("related", "self")!, body);
+export const named${method}: Promise<${method === "head" ? "Response | undefined" : "Payload"}> = client.${method}(resource${method}.getNamedLink("related", "self")!, body);
 `).join("\n")}
 declare const resource: Payload;
 export const external: Promise<unknown> = client.post(resource.getNamedLink("related", "external")!);
@@ -162,6 +163,195 @@ const bookmark = fromHref("https://example.test/");
 `);
   },
 );
+
+test("location_profile infers full target contracts independently of POST bodies and supports cycles", async () => {
+  const project = await fixture();
+  const childProfile = "https://example.test/profiles/child";
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { response: "../schemas/payload.json", location_profile: childProfile },
+    } },
+    rels: { create: [{ name: "self", profile: rootProfile }] },
+  });
+  await project.put("profiles/child.yml", {
+    profile: childProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/child.json" },
+      put: { request: "../schemas/payload.json", response: "../schemas/child.json" },
+      post: { location_profile: rootProfile },
+    } },
+    rels: { related: [{ name: "root", profile: rootProfile }] },
+  });
+  await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  expect(types).not.toContain("contractRegistry");
+  expect(types).not.toContain("profileContracts");
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
+import type { Response } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { Payload, Child } from "./generated/types.js";
+const client = createHttpClient();
+export async function navigate() {
+  const created = await client.post(fromRoot(root, "staging"));
+  const body: string = created.properties.id;
+  const headers: Headers = created.headers;
+  const location: string = created.location.href;
+  const child: Child = await client.get(created.location);
+  const label: string = child.properties;
+  const replaced: Child = await client.put(created.location, { id: "replacement" });
+  // @ts-expect-error The destination PUT requires its own request schema.
+  client.put(created.location);
+  // @ts-expect-error PUT is typed from the location profile, not the POST body.
+  client.put(created.location, { id: 123 });
+  const metadata = await client.post(created.location);
+  const response: Response = metadata;
+  const parent: Payload = await client.get(metadata.location);
+  // @ts-expect-error The destination POST has no response body schema.
+  metadata.properties;
+  const named = await client.post(parent.getNamedLink("create", "self")!);
+  const namedChild: Child = await client.get(named.location);
+  // @ts-expect-error Sharing the POST body schema does not add location to GET.
+  parent.location;
+  const back: Payload = await client.get(child.getNamedLink("related", "root")!);
+}
+`);
+});
+
+test("location_profile allows external destinations without promising their schemas", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { location_profile: "urn:external" },
+      put: { response: "../schemas/payload.json" },
+    } },
+  });
+  success(project.generate());
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
+import type { Response } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { Payload } from "./generated/types.js";
+const client = createHttpClient();
+export async function navigate() {
+  const created = await client.post(fromRoot(root, "staging"));
+  const response: Response = created;
+  const external: Promise<Response | undefined> = client.get(created.location);
+  // @ts-expect-error External destinations have no inferred request schema.
+  client.put(created.location, { id: "new" });
+  // @ts-expect-error External destinations have no inferred response schema.
+  const incorrect: Promise<Payload> = client.get(created.location);
+  // @ts-expect-error A schema-free POST exposes metadata, not invented fields.
+  created.properties;
+  const put = await client.put(fromRoot(root, "staging"));
+  // @ts-expect-error Omitting location_profile does not expose location.
+  put.location;
+}
+`);
+});
+
+test.each([
+  ["", "post", /must be a nonempty string/],
+  [false, "post", /must be a nonempty string/],
+  [123, "post", /must be a nonempty string/],
+  ["relative/profile", "post", /must be a profile URI/],
+  ["urn:target", "get", /only supported on POST/],
+])("rejects invalid location_profile %j on %s", async (locationProfile, method, error) => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { [method]: { location_profile: locationProfile } } },
+  });
+  const result = project.generate();
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain(`schema.application/json.${method}.location_profile`);
+  expect(result.stderr).toMatch(error);
+});
+
+test("the superseded returns_location field is not supported", async () => {
+  const project = await fixture();
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { post: { returns_location: true } } },
+  });
+  const result = project.generate();
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("post.returns_location: unknown body schema");
+});
+
+test("location target aliases do not collide with schema identifiers", async () => {
+  const project = await fixture({ ...basicSchema, title: "Profile0Methods" });
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { location_profile: rootProfile },
+    } },
+  });
+  success(project.generate());
+  const types = await readFile(project.output, "utf8");
+  const name = types.match(/export interface (\w+)/)?.[1];
+  expect(name).toBeDefined();
+  expect(name).not.toBe("Profile0Methods");
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { ${name} } from "./generated/types.js";
+export async function navigate() {
+  const client = createHttpClient();
+  const created = await client.post(fromRoot(root, "staging"));
+  const resource: ${name} = await client.get(created.location);
+}
+`);
+});
+
+test.each([false, true])("duplicate named targets preserve location_profile unions (all declared: %s)", async (allDeclared) => {
+  const project = await fixture();
+  const firstProfile = "urn:first";
+  const secondProfile = "urn:second";
+  await project.put("profiles/root.yml", {
+    profile: rootProfile,
+    schema: { "application/json": { get: { response: "../schemas/payload.json" } } },
+    rels: { create: [
+      { name: "resource", profile: firstProfile },
+      { name: "resource", profile: secondProfile },
+    ] },
+  });
+  await project.put("profiles/first.yml", {
+    profile: firstProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/payload.json" },
+      post: { response: "../schemas/payload.json", location_profile: firstProfile },
+    } },
+  });
+  await project.put("schemas/child.json", JSON.stringify({ title: "Child", type: "string" }));
+  await project.put("profiles/second.yml", {
+    profile: secondProfile,
+    schema: { "application/json": {
+      get: { response: "../schemas/child.json" },
+      post: {
+        response: "../schemas/payload.json",
+        ...(allDeclared ? { location_profile: secondProfile } : {}),
+      },
+    } },
+  });
+  success(project.generate());
+  await compileConsumer(project, `import { createHttpClient, fromRoot } from "@kewne/restspec";
+import { root } from "./generated/types.js";
+import type { Payload, Child } from "./generated/types.js";
+export async function navigate() {
+  const client = createHttpClient();
+  const resource = await client.get(fromRoot(root, "staging"));
+  const created = await client.post(resource.getNamedLink("create", "resource")!);
+  const id: string = created.properties.id;
+  ${allDeclared
+    ? "const destination: Promise<Payload | Child> = client.get(created.location);"
+    : "// @ts-expect-error Not every possible target promises a location.\n  created.location;"}
+}
+`);
+});
 
 test("parses per-method request and response schemas", async () => {
   const project = await fixture();
@@ -306,7 +496,7 @@ test("resource wrapper nests payload properties without wrapping nested objects"
   });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toMatch(/export interface Payload \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
+  expect(types).toMatch(/export interface Payload extends Response \{\s+properties: \{\s+id: string;\s+nested: \{\s+count: number;/);
   expect(types.match(/export interface /g)).toHaveLength(1);
   expect(types).toContain("getRel(rel: string): Link[];");
   expect(types).toContain("getNamedLink(rel: string, name: string): Link | undefined;");
@@ -513,7 +703,7 @@ client.post(typedLink, { label: 123 });
   expect(invalid.stdout).toContain("href");
   expect(invalid.stdout).toContain("Property 'get' does not exist");
   expect(invalid.stdout).toContain("Type 'string' is not assignable to type 'void'");
-  expect(invalid.stdout).toContain("Type 'Promise<unknown>' is not assignable to type 'Promise<string>'");
+  expect(invalid.stdout).toContain("Type 'Promise<Response | undefined>' is not assignable to type 'Promise<string>'");
   expect(invalid.stdout).toContain("Type 'void | undefined' is not assignable to type 'string'");
   expect(invalid.stdout).toContain("Type 'number' is not assignable to type 'string'");
 });
@@ -522,7 +712,7 @@ test("root export uses the generated root schema type name", async () => {
   const project = await fixture({ ...basicSchema, title: "Root payload" });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toContain('import type { ApiRoot, Link } from "@kewne/restspec";');
+  expect(types).toContain('import type { ApiRoot, Link, Response, LocationResponse } from "@kewne/restspec";');
   expect(types).toContain("export interface RootPayload");
   expect(types).toContain("export const root: ApiRoot<RootPayload, { staging: string; production: string; },");
   expect(types).toContain(`    env: {
@@ -542,7 +732,7 @@ test.each([
   const project = await fixture(schema);
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toContain(`export interface ${name} {`);
+  expect(types).toContain(`export interface ${name} extends Response {`);
   expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; },`);
 });
 
@@ -560,7 +750,7 @@ test("root export follows its profile rather than discovery order and shares sch
   });
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toMatch(/export interface First \{\s+properties:\s*boolean;/);
+  expect(types).toMatch(/export interface First extends Response \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
   expect(types).toContain("export const root: ApiRoot<Payload, { staging: string; production: string; },");
   expect(types.match(/getRel\(rel: string\)/g)).toHaveLength(2);
@@ -590,12 +780,12 @@ test("root export uses deconflicted schema identifiers", async () => {
   }));
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  const name = types.match(/export interface (\w+) \{\s+properties: \{\s+id:/)?.[1];
+  const name = types.match(/export interface (\w+) extends Response \{\s+properties: \{\s+id:/)?.[1];
   expect(name).toBeDefined();
   expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; production: string; },`);
 });
 
-test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s type name and preserves escaped values", async (title) => {
+test.each(["ApiRoot", "ENV", "Link", "Methods", "Response", "LocationResponse"])("root export handles the %s type name and preserves escaped values", async (title) => {
   const project = await fixture({ ...basicSchema, title });
   const env = {
     staging: 'https://staging.example.test/"\\\n',
@@ -620,6 +810,7 @@ test.each(["ApiRoot", "ENV", "Link", "Methods"])("root export handles the %s typ
   expect(name).not.toBe("ENV");
   expect(name).not.toBe("Link");
   expect(name).not.toBe("Methods");
+  expect(name).not.toBe(title);
   expect(types).toContain(`export const root: ApiRoot<${name}, { staging: string; ${JSON.stringify("prod-env\"\\\n")}: string; },`);
   expect(types).toContain(`        /**
          * Staging * / "\\
@@ -833,7 +1024,7 @@ test("discovers nested YAML profiles, includes unreachable profiles and deduplic
   await project.put("schemas/other.json", JSON.stringify({ title: "Other", type: "boolean" }));
   success(project.generate());
   const types = await readFile(project.output, "utf8");
-  expect(types).toMatch(/export interface Other \{\s+properties:\s*boolean;/);
+  expect(types).toMatch(/export interface Other extends Response \{\s+properties:\s*boolean;/);
   expect(types.match(/export interface Payload\b/g)).toHaveLength(1);
 });
 
@@ -963,7 +1154,7 @@ test("retains distinct top-level names and filename fallbacks across schemas", a
   const types = await readFile(project.output, "utf8");
   expect(types).toMatch(/export interface Payload\b/);
   expect(types).toMatch(/export interface Other\b/);
-  expect(types).toMatch(/export interface FallbackSchema \{\s+properties:\s*string;/);
+  expect(types).toMatch(/export interface FallbackSchema extends Response \{\s+properties:\s*string;/);
 });
 
 test("protects schemas consumed only through a reference", async () => {

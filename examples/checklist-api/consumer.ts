@@ -12,9 +12,11 @@ async function accessFromRoot() {
     const checklistLinks = root.getNamedLink('create', 'checklists')
     
     if (checklistLinks) {
-        await client.post(checklistLinks, {
+        const created = await client.post(checklistLinks, {
             title: 'My new checklist'
         })
+        const checklist = await client.get(created.location)
+        console.log(checklist.properties.title)
     }
 }
 

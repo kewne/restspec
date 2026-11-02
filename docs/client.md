@@ -55,9 +55,15 @@ never send request bodies, even when a schema or explicit tuple declares one.
 All methods send `Accept: application/hal+json, application/json` and use the
 same destination-scoped credentials. Nonempty JSON responses become resources
 with `properties`, `getRel`, and `getNamedLink`, including navigable relative links.
+Generated response resources extend a shared `Response` base with
+`headers: Headers`, allowing raw header access with `response.headers.get(name)`.
+Header metadata is not included in `properties`.
+
 HEAD, HTTP 204/205, and other successful responses with an empty body resolve to
-`undefined`. Method tuples remain unchanged, so a declared response resource
-does not guarantee a body at runtime. Invalid nonempty JSON rejects.
+`undefined` unless a Location header is present. In that case they return response
+metadata with headers, without inventing body-resource fields. HEAD always has a
+`Response | undefined` result type. Other declared response types trust the API
+contract: they do not guarantee a body at runtime. Invalid nonempty JSON rejects.
 
 Non-success HTTP responses reject with an error containing the requested URL,
 status code, and status text, including for HEAD requests.
@@ -75,6 +81,40 @@ const checklist = await client.post(createLink, {
 });
 console.log(checklist.properties.title);
 ```
+
+### Following Location
+
+Declare `location_profile` under POST in the target profile to give the POST
+result a required `location` link. For example, the checklist-list profile
+identifies the checklist profile as the creation response's Location target.
+The location profile supplies all of the link's method types, not just GET,
+independently of the POST body schema:
+
+```ts
+const created = await client.post(createLink, { title: "My new checklist" });
+console.log(created.headers.get("Location")); // Original header value.
+const checklist = await client.get(created.location);
+console.log(checklist.properties.title);
+```
+
+POST exposes a location link when its successful response contains a nonempty
+Location header, resolving relative values against the final response URL.
+No automatic GET is sent. Following the link uses the same client and its
+destination-scoped credentials.
+
+The required property is a compile-time contract, not a runtime check. The
+client neither requires status 201 nor rejects a successful response for a
+missing Location header. If the API violates its profile, `location` may be
+absent at runtime. Empty POST responses with Location expose headers and the
+link without body fields; declare no POST response schema for such APIs.
+External location profiles without local definitions use untyped methods.
+Without `location_profile`, generated response types do not expose `location`;
+raw headers remain accessible.
+
+In browsers, cross-origin APIs must expose Location (for example via
+`Access-Control-Expose-Headers: Location`) for fetch to make it available.
+
+### Replacing a resource
 
 For PUT, the checklist profile declares a named `edit` link and a request schema
 requiring a full replacement of the checklist's writable `title` and `items`.
@@ -111,7 +151,7 @@ for (const link of root.getRel("related")) {
 and a readonly `href` string. It does not accept caller-supplied type arguments.
 Use `getNamedLink` with a known pair for inferred request and response types.
 Client methods absent from a link's contract accept `void` and return
-`Promise<unknown>`. All `getRel` results, unknown named pairs, and external
+`Promise<Response | undefined>`. All `getRel` results, unknown named pairs, and external
 targets without local schemas use those defaults. These methods do not validate
 response data against the specification. `HttpClient` exposes only the seven
 standard methods listed above, even if a link's tuples describe a custom method.
@@ -131,7 +171,9 @@ const checklist = await client.get(bookmarkLink);
 ```
 
 The resource type is supplied by the caller; it does not validate the response.
-Without a resource type argument, the GET response type is `unknown`.
+Without a resource type argument, the GET response type is `Response | undefined`:
+headers are available when a response object is returned, but body fields are
+not inferred.
 
 ## Generated Module Reference
 
@@ -140,9 +182,9 @@ The checklist example's generated module includes the following declarations
 the typed `getNamedLink` overloads described above):
 
 ```ts
-import type { ApiRoot, Link } from "@kewne/restspec";
+import type { ApiRoot, Link, Response } from "@kewne/restspec";
 
-export interface Root {
+export interface Root extends Response {
    properties: { [key: string]: unknown };
    getRel(rel: "related" | "create"): Link[];
    getRel(rel: string): Link[];
@@ -155,7 +197,7 @@ export const root: ApiRoot<Root, { local: string; staging: string; production: s
    put: [void, unknown];
    patch: [void, unknown];
    delete: [void, unknown];
-   head: [void, unknown];
+   head: [void, Response | undefined];
    options: [void, unknown];
 }> = {
    env: {

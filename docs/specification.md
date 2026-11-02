@@ -48,7 +48,9 @@ Each YAML profile contains:
 - `profile`: a URI identifying the entity's profile, not a fixed API endpoint.
 - `schema`: an optional mapping from payload media types, such as
    `application/json`, to HTTP methods. Each method can specify a `request`
-   schema, a `response` schema, or both. Schema paths are resolved relative to
+   schema, a `response` schema, or both. POST can also specify `location_profile`,
+   the profile URI of the resource identified by the response's Location header.
+   Schema paths are resolved relative to
    the profile file; `file:` and `https:` URLs are also supported.
 - `rels`: link descriptions grouped by relation type. Each description includes
    a `name`, a human-readable `description`, and the target entity's `profile` URI.
@@ -63,6 +65,7 @@ schema:
       post:
          request: ../schemas/create-checklist.json
          response: ../schemas/checklist.json
+         location_profile: https://example.com/profiles/checklist
       patch:
          request: ../schemas/update-checklist.json
 rels: {}
@@ -74,6 +77,18 @@ missing response schema means `unknown`, not `void`, even for methods commonly
 used without a response body. Methods and the entire `schema` mapping may be
 omitted. The former `schema.application/json: path` shorthand is not supported.
 Type generation currently consumes only `application/json` schemas.
+
+`location_profile` is optional and supported only on POST. When supplied, its
+target profile determines the generated response's required `location` link
+and all of that link's method contracts, independently of the POST body schema.
+The URI is resolved like a relation's target profile; external profiles without
+local definitions are allowed and produce untyped methods. Omission means no
+typed location property. A POST without a response schema can still declare a
+location profile and return only headers and the location link.
+
+The client trusts this declaration: it does not enforce a 201 Created status or
+the presence of Location. APIs must honor their declared contracts for the
+required location property and response-body fields to exist at runtime.
 
 Relation types describe protocols for how clients can interact with linked
 entities. The simplest relation type is `related`: it identifies an entity that

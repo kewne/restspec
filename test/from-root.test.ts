@@ -1,10 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { expect, onTestFinished, test } from "vitest";
-import { type ApiRoot, createHttpClient, createLink, type CredentialsMap, fromHref, fromRoot, type Link } from "../src/base-types.js";
+import { type ApiRoot, createHttpClient, createLink, type CredentialsMap, fromHref, fromRoot, type Link, type LocationResponse } from "../src/base-types.js";
 import { parseHalResource } from "../src/hal.js";
 
 const client = createHttpClient();
+
+type CreatedRoot = LocationResponse<TestRoot, { get: [void, TestSubscription] }>;
 
 interface TestSubscription {
   properties: {
@@ -459,4 +461,117 @@ test("HAL relative links resolve against the final response URL after a redirect
 
   const resource = await client.get(fromHref<TestRoot>(`${baseUrl}/entry`));
   expect(resource.getNamedLink("related", "subscription")?.href).toBe(`${baseUrl}/api/child`);
+});
+
+test("POST exposes raw headers and a navigable Location without automatically fetching it", async () => {
+  const requests: string[] = [];
+  const baseUrl = await startTestServer((req, res) => {
+    requests.push(`${req.method} ${req.url}`);
+    if (req.method === "POST") {
+      res.writeHead(201, { Location: "/subscription", "X-Request-Id": "created-123" });
+      res.end(JSON.stringify({ version: "3.0.0", _links: { self: { href: "/root" } } }));
+    } else {
+      res.end(JSON.stringify({ status: "ACTIVE" }));
+    }
+  });
+  const link: Link<{ post: [void, CreatedRoot] }> = { href: `${baseUrl}/root` };
+  const created = await client.post(link);
+
+  expect(created.headers).toBeInstanceOf(Headers);
+  expect(created.headers.get("location")).toBe("/subscription");
+  expect(created.headers.get("x-request-id")).toBe("created-123");
+  expect(created.properties).toEqual({ version: "3.0.0" });
+  expect(created.getRel("self")[0]?.href).toBe(`${baseUrl}/root`);
+  expect(created.location.href).toBe(`${baseUrl}/subscription`);
+  expect(Object.keys(created.location)).toEqual(["href"]);
+  expect(requests).toEqual(["POST /root"]);
+
+  const subscription = await client.get(created.location);
+  expect(subscription.properties.status).toBe("ACTIVE");
+  expect(subscription.headers).toBeInstanceOf(Headers);
+  expect(requests).toEqual(["POST /root", "GET /subscription"]);
+});
+
+test.each([200, 201, 202, 204, 205])("POST with Location accepts successful status %s", async (status) => {
+  const baseUrl = await startTestServer((_req, res) => {
+    res.writeHead(status, { Location: "/created" });
+    res.end(status === 204 || status === 205 ? undefined : '{"version":"3.0.0"}');
+  });
+  const link: Link<{ post: [void, CreatedRoot] }> = { href: baseUrl };
+  const created = await client.post(link);
+  expect(created.location.href).toBe(`${baseUrl}/created`);
+  expect(created.headers.get("Location")).toBe("/created");
+  if (status === 204 || status === 205) {
+    expect(created).not.toHaveProperty("properties");
+  } else {
+    expect(created.properties.version).toBe("3.0.0");
+  }
+});
+
+test.each([undefined, ""])("POST does not enforce a declared Location when its header is %j", async (location) => {
+  const baseUrl = await startTestServer((_req, res) => {
+    if (location !== undefined) res.setHeader("Location", location);
+    res.end('{"version":"3.0.0"}');
+  });
+  const link: Link<{ post: [void, CreatedRoot] }> = { href: baseUrl };
+  const created = await client.post(link);
+  expect(created.properties.version).toBe("3.0.0");
+  expect(created).not.toHaveProperty("location");
+});
+
+test.each(standardMethods)("client.%s retains headers on an empty success with Location", async (method) => {
+  const baseUrl = await startTestServer((_req, res) => {
+    res.writeHead(201, { Location: "/created", "X-Request-Id": "empty-123" });
+    res.end();
+  });
+  const response = await client[method](fromHref(baseUrl));
+  expect(response?.headers.get("X-Request-Id")).toBe("empty-123");
+  expect(response?.headers.get("Location")).toBe("/created");
+  expect(response).not.toHaveProperty("properties");
+  expect(response).not.toHaveProperty("getRel");
+  expect(response).not.toHaveProperty("getNamedLink");
+  if (method === "post") {
+    expect(response).toHaveProperty("location.href", `${baseUrl}/created`);
+  } else {
+    expect(response).not.toHaveProperty("location");
+  }
+});
+
+test("POST Location resolves against the final response URL after a redirect", async () => {
+  const baseUrl = await startTestServer((req, res) => {
+    if (req.url === "/entry") {
+      res.writeHead(307, { Location: "/api/create" });
+    } else {
+      res.writeHead(201, { Location: "created/1" });
+    }
+    res.end();
+  });
+  const link: Link<{ post: [void, CreatedRoot] }> = { href: `${baseUrl}/entry` };
+  const created = await client.post(link);
+  expect(created.location.href).toBe(`${baseUrl}/api/created/1`);
+  expect(created.headers.get("Location")).toBe("created/1");
+});
+
+test.each([false, true])("following an absolute Location scopes credentials to its destination (configured: %s)", async (configureExternal) => {
+  const authorizations: (string | undefined)[] = [];
+  const externalUrl = await startTestServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    res.end('{"status":"ACTIVE"}');
+  });
+  const baseUrl = await startTestServer((req, res) => {
+    authorizations.push(req.headers.authorization);
+    res.writeHead(201, { Location: `${externalUrl}/subscription` });
+    res.end();
+  });
+  const authenticatedClient = createHttpClient({
+    credentials: {
+      [baseUrl]: { type: "bearer", token: "source-token" },
+      ...(configureExternal ? { [externalUrl]: { type: "bearer" as const, token: "destination-token" } } : {}),
+    },
+  });
+  const link: Link<{ post: [void, CreatedRoot] }> = { href: baseUrl };
+  const created = await authenticatedClient.post(link);
+  const subscription = await authenticatedClient.get(created.location);
+  expect(subscription.properties.status).toBe("ACTIVE");
+  expect(authorizations).toEqual(["Bearer source-token", configureExternal ? "Bearer destination-token" : undefined]);
 });

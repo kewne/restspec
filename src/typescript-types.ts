@@ -15,13 +15,15 @@ import {
 
 export const httpMethods = ["get", "post", "put", "patch", "delete", "head", "options"] as const;
 
-export type MethodSources = Readonly<Record<string, { request?: string; response?: string }>>;
+export type MethodSource = { request?: string; response?: string; locationProfile?: string };
+export type MethodSources = Readonly<Record<string, MethodSource>>;
 
 type RootMetadata = {
   env: Readonly<Record<string, { readonly url: string; readonly description?: string }>>;
   profile: string;
   sourceName: string | undefined;
   methods: MethodSources;
+  profiles: ReadonlyMap<string, MethodSources>;
 };
 
 type Relations = ReadonlyMap<string, ReadonlyMap<string, readonly {
@@ -33,6 +35,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
   private rootName: Name | undefined;
   private readonly inlineTypes = new Set<Type>();
   private readonly recursiveTypes = new Set<Type>();
+  private readonly locationProfiles: readonly string[];
 
   constructor(
     language: TypeScriptTypesLanguage,
@@ -43,10 +46,17 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
     private readonly sourceKinds: ReadonlyMap<string, "request" | "response">,
   ) {
     super(language, renderContext, options);
+    this.locationProfiles = [...new Set([...root.profiles.values()].flatMap((methods) =>
+      Object.values(methods).flatMap((method) => method.locationProfile === undefined ? [] : [method.locationProfile]),
+    ))].filter((profile) => root.profiles.has(profile));
   }
 
   protected override forbiddenNamesForGlobalNamespace(): string[] {
-    return [...super.forbiddenNamesForGlobalNamespace(), "ApiRoot", "ENV", "Link", "Methods", "METHODS", "root"];
+    return [
+      ...super.forbiddenNamesForGlobalNamespace(), "ApiRoot", "ENV", "Link", "Methods", "METHODS", "root",
+      "Response", "LocationResponse",
+      ...this.locationProfiles.map((_, index) => `Profile${index}Methods`),
+    ];
   }
 
   protected override makeNameForTopLevel(type: Type, givenName: string, namedType: Type | undefined): Name {
@@ -114,7 +124,7 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
       this.emitLine("export type ", name, " = ", this.sourceFor(type.getProperties().get("properties")!.type).source, ";");
       return;
     }
-    this.emitLine("export interface ", name, " {");
+    this.emitLine("export interface ", name, " extends Response {");
     this.indent(() => {
       const properties = type.getProperties().get("properties")!;
       this.emitLine("properties: ", this.sourceFor(properties.type).source, ";");
@@ -141,8 +151,8 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
   }
 
   private methodsSource(targets: readonly MethodSources[]): Sourcelike {
-    const bodySource = (method: string, body: "request" | "response"): Sourcelike => {
-      const sources = new Set(targets.map((target) => target[method]?.[body]));
+    const bodySource = (method: string, body: "request" | "response", selectedTargets = targets): Sourcelike => {
+      const sources = new Set(selectedTargets.map((target) => target[method]?.[body]));
       if (body === "response" && sources.has(undefined)) return "unknown";
       return [...sources].map((source, index) => {
         const type = source === undefined ? undefined : this.topLevels.get(source);
@@ -155,13 +165,36 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
         ];
       });
     };
+    const responseSource = (method: string): Sourcelike => {
+      if (method === "head") return "Response | undefined";
+      if (method !== "post" || !targets.some((target) => target.post?.locationProfile !== undefined)) {
+        return bodySource(method, "response");
+      }
+      const located = targets.filter((target) => target.post?.locationProfile !== undefined);
+      const others = targets.filter((target) => target.post?.locationProfile === undefined);
+      const locatedBody = located.some((target) => target.post?.response === undefined)
+        ? "Response" : bodySource(method, "response", located);
+      const locationMethods = [...new Set(located.map((target) => target.post!.locationProfile!))]
+        .map((profile, index) => {
+          const profileIndex = this.locationProfiles.indexOf(profile);
+          return [index > 0 ? " | " : "", profileIndex < 0 ? "{}" : `Profile${profileIndex}Methods`];
+        });
+      return [
+        "LocationResponse<", locatedBody, ", ", locationMethods, ">",
+        ...others.map((target) => {
+          const { response } = target.post ?? {};
+          const type = response === undefined ? undefined : this.topLevels.get(response);
+          return [" | ", type === undefined ? "Response | undefined" : this.nameForNamedType(type)];
+        }),
+      ];
+    };
     return ["{ ", ...httpMethods.map((method, index) => [
-      index > 0 ? "; " : "", method, ": [", bodySource(method, "request"), ", ", bodySource(method, "response"), "]",
+      index > 0 ? "; " : "", method, ": [", bodySource(method, "request"), ", ", responseSource(method), "]",
     ]), " }"];
   }
 
   protected override emitTypes(): void {
-    this.emitLine('import type { ApiRoot, Link } from "@kewne/restspec";');
+    this.emitLine('import type { ApiRoot, Link, Response, LocationResponse } from "@kewne/restspec";');
     this.ensureBlankLine();
     this.forEachTopLevel("none", (type) => {
       if (type instanceof ObjectType) {
@@ -189,6 +222,10 @@ class ExportedTypesRenderer extends TypeScriptRenderer {
         }
       },
     );
+    this.ensureBlankLine();
+    for (const [index, profile] of this.locationProfiles.entries()) {
+      this.emitLine("type Profile", String(index), "Methods = ", this.methodsSource([this.root.profiles.get(profile)!]), ";");
+    }
     this.ensureBlankLine();
     const envEntries = Object.entries(this.root.env);
     const envType: Sourcelike[] = envEntries.map(([name], index) => [

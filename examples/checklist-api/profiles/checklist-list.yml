@@ -6,6 +6,7 @@ schema:
     post:
       request: ../schemas/json/create-checklist.json
       response: ../schemas/json/checklist.json
+      location_profile: https://checklists.keeoon.dev/profiles/checklist
 rels:
   item:
     - profile: https://checklists.keeoon.dev/profiles/checklist

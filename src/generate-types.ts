@@ -3,7 +3,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import { InputData, JSONSchemaInput, JSONSchemaStore, quicktype } from "quicktype-core";
-import { httpMethods, type MethodSources, TypeScriptTypesLanguage } from "./typescript-types.js";
+import { httpMethods, type MethodSource, type MethodSources, TypeScriptTypesLanguage } from "./typescript-types.js";
 
 type Schema = Record<string, unknown> | boolean;
 
@@ -261,7 +261,7 @@ export async function generateTypes(
   }
   const rootProfile = requiredString(spec.rootProfile, "rootProfile", entrypointLabel);
   const profiles = new Map<string, string>();
-  const profileMethods = new Map<string, Record<string, { request?: string; response?: string }>>();
+  const profileMethods = new Map<string, Record<string, MethodSource>>();
   const profileRelations = new Map<string, Map<string, { name: string; profile: string }[]>>();
   const schemaLocations = new Map<string, Location>();
   const responseSchemas = new Set<string>();
@@ -304,7 +304,7 @@ export async function generateTypes(
     if (profile.schema !== undefined && !isMapping(profile.schema)) {
       throw new Error(`${label}: schema must be a media-type mapping`);
     }
-    const methods: Record<string, { request?: string; response?: string }> = {};
+    const methods: Record<string, MethodSource> = {};
     profileMethods.set(uri, methods);
     const schema = profile.schema?.["application/json"];
     if (schema !== undefined) {
@@ -318,9 +318,21 @@ export async function generateTypes(
         if (!isMapping(bodies)) {
           throw new Error(`${label}: schema.application/json.${method} must be a body-schema mapping`);
         }
-        const slots: { request?: string; response?: string } = {};
+        const slots: MethodSource = {};
         methods[method] = slots;
         for (const [body, reference] of Object.entries(bodies)) {
+          if (body === "location_profile") {
+            const field = `schema.application/json.${method}.${body}`;
+            if (method !== "post") {
+              throw new Error(`${label}: ${field} is only supported on POST`);
+            }
+            const target = requiredString(reference, field, label);
+            if (!URL.canParse(target)) {
+              throw new Error(`${label}: ${field} must be a profile URI`);
+            }
+            slots.locationProfile = target;
+            continue;
+          }
           if (body !== "request" && body !== "response") {
             throw new Error(`${label}: schema.application/json.${method}.${body}: unknown body schema`);
           }
@@ -391,6 +403,7 @@ export async function generateTypes(
     Object.entries(profileMethods.get(profile) ?? {}).map(([method, bodies]) => [method, {
       ...(bodies.request === undefined ? {} : { request: sourceNames.get(bodies.request)! }),
       ...(bodies.response === undefined ? {} : { response: sourceNames.get(bodies.response)! }),
+      ...(bodies.locationProfile === undefined ? {} : { locationProfile: bodies.locationProfile }),
     }]),
   );
   const relations = new Map<string, Map<string, { name: string; methods: MethodSources }[]>>();
@@ -413,7 +426,10 @@ export async function generateTypes(
   const { lines } = await quicktype({
     inputData,
     lang: new TypeScriptTypesLanguage(
-      { env, profile: rootProfile, sourceName: rootMethods.get?.response, methods: rootMethods },
+      {
+        env, profile: rootProfile, sourceName: rootMethods.get?.response, methods: rootMethods,
+        profiles: new Map([...profiles.keys()].map((profile) => [profile, methodsFor(profile)])),
+      },
       relations,
       sourceKinds,
     ),

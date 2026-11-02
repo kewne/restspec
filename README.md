@@ -96,6 +96,19 @@ const checklist = await client.post(createLink, {
 console.log(checklist.properties.title);
 ```
 
+To follow the Location header after creation, add
+`location_profile: https://checklists.keeoon.dev/profiles/checklist` under
+`schema.application/json.post` in the checklist-list profile:
+
+```ts
+const created = await client.post(createLink, { title: "My new checklist" });
+console.log(created.headers.get("Location"));
+const checklist = await client.get(created.location);
+```
+
+The target profile supplies the location link's method types. The client trusts
+the declaration without enforcing status 201 or Location presence.
+
 PUT also uses generated navigation and request methods. The checklist profile's
 named `edit` link accepts a full replacement of its writable `title` and `items`:
 

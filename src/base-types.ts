@@ -14,6 +14,14 @@ export type Methods = {
 
 type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options'
 
+export type Response = {
+    readonly headers: Headers
+}
+
+export type LocationResponse<RESOURCE, TYPES extends Methods> = RESOURCE & Response & {
+    readonly location: Link<TYPES>
+}
+
 export type BearerCredentials = { type: 'bearer'; token: string }
 export type Credentials = BearerCredentials
 export type CredentialsMap = Readonly<Record<string, Credentials>>
@@ -47,11 +55,15 @@ type RequestArguments<BODY> = void extends BODY
     ? unknown extends BODY ? [reqBody: BODY] : [reqBody?: BODY]
     : [reqBody: BODY]
 
+type ResponseResult<RESOURCE> = unknown extends RESOURCE ? Response | undefined
+    : RESOURCE extends undefined ? undefined : RESOURCE & Response
+
 export type HttpClient = {
     [method in HttpMethod]: <TYPES extends Methods>(
         link: Link<TYPES>,
         ...args: NoInfer<RequestArguments<method extends keyof TYPES ? TYPES[method][0] : void>>
-    ) => Promise<method extends keyof TYPES ? TYPES[method][1] : unknown>
+    ) => Promise<method extends 'head' ? Response | undefined
+        : ResponseResult<method extends keyof TYPES ? TYPES[method][1] : unknown>>
 }
 
 export function createHttpClient(options?: ClientOptions): HttpClient {
@@ -75,12 +87,26 @@ export function createHttpClient(options?: ClientOptions): HttpClient {
         if (!response.ok) {
             throw new Error(`${href}: HTTP ${response.status} ${response.statusText}`)
         }
-        if (method === 'head' || response.status === 204 || response.status === 205) return undefined
-        const responseText = await response.text()
-        if (responseText.length === 0) return undefined
+        const rawLocation = response.headers.get('Location')
+        const location = method === 'post' && rawLocation
+            ? createLink(new URL(rawLocation, response.url || href).href) : undefined
+        const metadata: Response & { location?: Link } = {
+            headers: response.headers,
+            ...(location === undefined ? {} : { location }),
+        }
+        const responseText = method === 'head' || response.status === 204 || response.status === 205
+            ? '' : await response.text()
+        if (responseText.length === 0) {
+            return rawLocation !== null ? metadata : undefined
+        }
         const body: unknown = JSON.parse(responseText)
-        return parseHalResource(body, (childHref, childName, childTitle) =>
+        const resource = parseHalResource<{
+            properties: unknown
+            getRel(rel: string): Link[]
+            getNamedLink(rel: string, name: string): Link | undefined
+        }>(body, (childHref, childName, childTitle) =>
             createLink(new URL(childHref, response.url || href).href, childName, childTitle))
+        return { ...resource, ...metadata }
     }
 
     return {
@@ -99,17 +125,26 @@ export function createLink<RESOURCE = unknown>(
     name?: string,
     title?: string,
 ): Link<{ get: [void, RESOURCE] }> {
-    return {
+    return createTypedLink(href, name, title)
+}
+
+function createTypedLink<TYPES extends Methods = {}>(
+    href: string,
+    name?: string,
+    title?: string,
+): Link<TYPES> {
+    const link: Link<TYPES> = {
         ...(name !== undefined ? { name } : {}),
         ...(title !== undefined ? { title } : {}),
         get href() {
             return href
         },
     }
+    return link
 }
 
 export function fromRoot<RESOURCE, ENV extends Record<string, string>, ROOT_METHODS extends Methods = { get: [void, RESOURCE] }>(root: ApiRoot<RESOURCE, ENV, ROOT_METHODS>, env: keyof ENV & string): Link<ROOT_METHODS> {
-    return fromHref<RESOURCE>(root.env[env]!) as unknown as Link<ROOT_METHODS>
+    return createTypedLink(root.env[env]!)
 }
 
 export function fromHref<RESOURCE = unknown>(href: string): Link<{ get: [void, RESOURCE] }> {
